@@ -1,18 +1,18 @@
 ---
 name: openclaw-safe-update
-description: Rehearse an OpenClaw version update without touching a live runtime. Use when comparing current and target OpenClaw packages, checking customized Signal, Matrix, MCP, provider, or runtime integration surfaces, producing synthetic-update evidence, preparing a Patchwarden-compatible review bundle, or writing a rollback-aware operator plan before an update.
+description: Dry-run an OpenClaw version update without touching a live runtime. Use when comparing current and target OpenClaw packages, checking customized Signal, Matrix, MCP, provider, or runtime integration surfaces, producing synthetic-update evidence, preparing a Patchwarden-compatible review bundle, or writing a rollback-aware operator plan before an update.
 ---
 
 # OpenClaw Safe Upgrade Rehearsal Kit
 
-Prepare evidence for an OpenClaw update while keeping production unchanged. Treat the generated verdict as input to an operator decision, never as permission to update.
+Prepare evidence for an OpenClaw update while keeping production unchanged. This workflow is a dry run: treat the generated verdict as input to an operator decision, never as permission to update.
 
 ## Safety Contract
 
 - Do not run `openclaw update`, install packages globally, repair dependencies, deploy, restart services, or mutate live configuration.
 - Do not execute package lifecycle scripts or code from downloaded archives.
 - Do not include secrets, private conversations, live configuration values, or raw production logs in cloud reviews or artifacts.
-- Fail closed when package metadata, integrity, required packages, customization checks, or required evidence are missing.
+- When package metadata, integrity, required packages, customization checks, or required evidence are missing, return `blocked` and stop instead of guessing.
 - Stop at `ready_for_operator_plan`. A separate, explicit operator approval is required for every live mutation.
 
 Read [references/evidence-contract.md](references/evidence-contract.md) before changing the artifact schema or interpreting a verdict.

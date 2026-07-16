@@ -1,0 +1,7 @@
+.git/
+.github/
+README.md
+assets/brand/
+tests/
+__pycache__/
+*.pyc
