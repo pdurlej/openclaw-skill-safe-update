@@ -8,6 +8,7 @@ The safe-update rehearsal is a read-only package compatibility check. It does no
 - Registry metadata containing package name, version, `dist.integrity`, and `dist.shasum`.
 - Current and target package archives downloaded without installation.
 - A customization manifest describing deployment-specific compatibility checks, unless the operator explicitly confirms a vanilla deployment.
+- An installation coverage profile declaring the runtime Node version, required surfaces, their customization evidence, and concrete post-upgrade checks.
 
 ## Outputs
 
@@ -15,9 +16,13 @@ Every JSON output includes `effect: read_only_openclaw_update_rehearsal`, `runti
 
 `runtime-truth.json` records exact package coordinates and integrity validation.
 
-`synthetic-update.json` records archive safety, package identity, and bounded added, removed, and changed member lists.
+`synthetic-update.json` records archive safety, package identity, bounded added, removed, and changed member lists, plus current-to-target changes in Node engines, dependencies, optional and peer dependencies, lifecycle scripts, and executable declarations. Changed lifecycle scripts and incompatible or unproven Node requirements block the rehearsal.
 
 `customization-compatibility.json` records every requested customization check and its result. Missing members, unreadable text, or absent anchors fail closed.
+
+`coverage-report.json` records every declared installation surface and verifies that required surfaces have post-upgrade checks and that referenced customization checks exist and passed.
+
+`post-upgrade-e2e.json` is a generated test plan. Its checks remain `not_run`; generation is not proof of live behavior.
 
 `evidence-bundle.json` binds the evidence artifacts by SHA-256. A downstream gate may translate this bundle to its own schema, but must preserve failures and the no-approval state.
 
@@ -27,6 +32,8 @@ Every JSON output includes `effect: read_only_openclaw_update_rehearsal`, `runti
 - `ready_for_operator_plan`: package-level evidence passed; prepare a rollback-aware plan and request separate approval for any live mutation.
 
 `summary.md` is a human-readable view and is not authoritative over the JSON artifacts.
+
+`operator-plan.md` binds the target and evidence into a review surface, lists the still-missing operator inputs, and stops before apply.
 
 ## Non-Claims
 
@@ -40,7 +47,17 @@ A green rehearsal does not prove:
 - systemd, container, filesystem ownership, or gateway behavior;
 - rollback against live persistent state.
 
-Those surfaces require fresh post-deploy E2E evidence during an approved maintenance window. The operator plan must enumerate them explicitly.
+Those surfaces require fresh post-deploy E2E evidence during an approved maintenance window. The coverage profile and generated operator plan must enumerate them explicitly.
+
+## Installation Coverage Profile
+
+Schema: `openclaw.safe_update.coverage.v1`.
+
+The supported 1.1 install shape is `npm_global_linux`. `runtime.node_version` must be an exact version. Every surface requires a unique `id`, a supported `category`, a boolean `required` flag, a list of customization check IDs, and a list of concrete post-update checks. A required surface with no post-update check is blocked.
+
+Supported categories are `channel`, `plugin`, `mcp`, `memory`, `persona`, `provider`, `service`, `attachment`, `voice`, and `other`.
+
+The profile is a declaration of expected behavior, not an automatic discovery claim. The `inventory` command deliberately does not read secrets, configuration values, conversations, or service state.
 
 ## Customization Manifest
 

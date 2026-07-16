@@ -47,6 +47,34 @@ body:
         - Forward recovery required
     validations:
       required: true
+  - type: checkboxes
+    id: affected-surfaces
+    attributes:
+      label: Affected surfaces
+      description: Select every surface involved in the result.
+      options:
+        - label: Package install or lifecycle scripts
+        - label: Node or native dependency compatibility
+        - label: Signal, Matrix, or another channel
+        - label: Attachments or voice
+        - label: MCP discovery or calls
+        - label: Memory or persona continuity
+        - label: Provider authentication or quota
+        - label: Gateway, service manager, or filesystem ownership
+        - label: Backup, rollback, or forward recovery
+  - type: dropdown
+    id: detection
+    attributes:
+      label: When was it detected?
+      options:
+        - Inventory or target metadata review
+        - Synthetic package rehearsal
+        - Customization or coverage gate
+        - Activation or restart
+        - Post-upgrade E2E
+        - Later in production
+    validations:
+      required: true
   - type: textarea
     id: experience
     attributes:
@@ -64,6 +92,11 @@ body:
     attributes:
       label: Resolution or workaround
       description: What fixed it, or what evidence is still missing?
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback or forward recovery evidence
+      description: What path was available, and was it actually verified? Do not include private paths or values.
   - type: checkboxes
     id: safety
     attributes:

@@ -5,7 +5,7 @@
 # OpenClaw Safe Upgrade Rehearsal Kit
 
 <p align="center">
-  Rehearse the upgrade before your runtime has to.
+  Know what will break before it breaks.
 </p>
 
 <p align="center">
@@ -16,17 +16,35 @@
   <img alt="Dry run only" src="https://img.shields.io/badge/mode-dry%20run%20only-222222">
 </p>
 
-This project gives humans, Codex, and OpenClaw a repeatable way to inspect an
-OpenClaw update before touching a live installation. It downloads exact npm
-artifacts, verifies their identity and integrity, compares package surfaces,
-checks deployment-specific customizations, and emits a hash-bound evidence
-bundle.
+No two real OpenClaw installations are quite the same. Channels, plugins, MCPs,
+memory, providers, services, wrappers, and local choices turn each one into its
+own system. This kit gives humans, Codex, Claude Code, and OpenClaw a repeatable
+way to inspect an update against that declared system before touching the live
+installation.
+
+Let an agent do the slow comparison overnight. Before you press Enter on an
+update, get an honest map of what was checked, what is risky, and what remains
+unproven. The kit downloads exact npm artifacts, verifies their identity and
+integrity, compares package and metadata surfaces, checks declared local
+contracts, and emits a hash-bound evidence bundle plus a post-upgrade E2E plan.
 
 **Dry run only:** this project does not update OpenClaw. It never deploys,
 restarts services, executes package lifecycle scripts, or treats a green report
 as permission to mutate production. When required evidence is missing or a
-compatibility check fails, it returns `blocked` and stops instead of guessing.
+compatibility or installation-coverage check fails, it returns `blocked` and
+stops instead of guessing.
 That is what “fail closed” means here.
+
+```mermaid
+flowchart LR
+    A["Inventory your installation"] --> B["Fetch exact package artifacts"]
+    B --> C["Verify bytes and compare package metadata"]
+    C --> D["Check declared customizations and coverage"]
+    D -->|"evidence missing or risk unproven"| E["BLOCKED"]
+    D -->|"all pre-update evidence passes"| F["READY FOR OPERATOR PLAN"]
+    F --> G["Approved update window"]
+    G --> H["Run declared post-upgrade E2E checks"]
+```
 
 ## Why this exists
 
@@ -94,6 +112,10 @@ Use exact versions. Include every separately distributed package your runtime
 depends on.
 
 ```bash
+python3 scripts/openclaw_safe_update.py inventory \
+  --package-root "$(npm root -g)/openclaw" \
+  --output-dir .openclaw-safe-update/inventory
+
 python3 scripts/openclaw_safe_update.py fetch \
   --current-version 2026.6.11 \
   --target-version 2026.7.1 \
@@ -103,13 +125,19 @@ python3 scripts/openclaw_safe_update.py fetch \
 python3 scripts/openclaw_safe_update.py simulate \
   --input-dir artifacts/input \
   --customizations assets/customizations.example.json \
+  --coverage assets/coverage.example.json \
   --output-dir artifacts/safe-update
 ```
 
-Replace the example customization manifest with checks for your actual
-wrappers, entrypoints, plugin contracts, and overlays. A vanilla deployment can
-use `--allow-no-customizations`, but only after explicitly confirming that it
-has no local integration surface.
+`inventory` reads only the installed package metadata. It does not inspect
+OpenClaw configuration, credentials, conversations, or service state. Complete
+its `coverage.draft.json` with every channel, plugin, MCP, memory, provider,
+service, persona, attachment, and voice surface you need to preserve.
+
+Replace both example manifests with checks for your actual system. A genuinely
+vanilla deployment can use `--allow-no-customizations --allow-no-coverage
+--runtime-node-version <exact-version>`, but that explicit escape hatch removes
+most of the protection this project exists to provide.
 
 ## What you get
 
@@ -118,13 +146,22 @@ has no local integration surface.
 | `runtime-truth.json` | Exact package coordinates and integrity receipts |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
+| `coverage-report.json` | Whether every required installation surface is represented and bound to evidence |
+| `post-upgrade-e2e.json` | Ordered, still-`not_run` checks for channels, memory, MCPs, voice, persona, and services |
 | `evidence-bundle.json` | SHA-256 binding for downstream review or policy gates |
 | `verdict.json` | Machine-readable `blocked` or `ready_for_operator_plan` verdict |
 | `summary.md` | Human-readable review surface |
+| `operator-plan.md` | Rollback-aware preparation that explicitly stops before apply |
 
-`ready_for_operator_plan` means package-level evidence passed. It does **not**
-mean “update now.” A real operator plan still needs backups, a maintenance
-window, runtime-specific postchecks, and an explicit approval boundary.
+`ready_for_operator_plan` means exact package, customization, runtime, and
+declared installation-coverage evidence passed. It does **not** mean “update
+now,” and it does not pretend that post-upgrade checks already ran. A real
+operator still needs a verified backup, a lossless rollback, a maintenance
+window, and explicit approval for the exact mutation.
+
+The gate tells you **what is at risk, which evidence failed, and what still must
+be proven**. It deliberately does not prescribe how to rewrite every local
+integration. That repair belongs to the owner of the installation.
 
 ## Field notes
 
@@ -133,6 +170,8 @@ The current lessons came from real upgrade rehearsals:
 - Treat core and external plugins as one dependency transaction.
 - Check the exact `engines.node` range for plugins and native dependencies, not
   only OpenClaw core.
+- Treat changed `preinstall`, `install`, `postinstall`, `prepack`, or `prepare`
+  scripts as a stop condition until their external effects are understood.
 - An “offline install” is not offline when a lifecycle script can download a
   binary from GitHub.
 - Prefetch release archives and native artifacts, verify them, and bind their
@@ -171,6 +210,11 @@ into the skill, evidence contract, examples, and tests after validation.
 The first stable lane targets npm-global OpenClaw installations on Linux. Other
 installation shapes should arrive as explicit adapters rather than pretending
 the same rollback and activation rules fit every runtime.
+
+Version 1.1 keeps analysis deterministic and single-process. Parallel workers
+for packages, channels, MCPs, memory, providers, and services are planned for
+1.2, with one deterministic aggregator retaining ownership of the final
+verdict.
 
 This is an independent community project and is not an official OpenClaw
 release or endorsement.

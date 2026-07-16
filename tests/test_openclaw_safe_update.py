@@ -23,8 +23,15 @@ HERO = ROOT / "assets" / "brand" / "openclaw-safe-upgrade-hero.png"
 CLAWHUB_IGNORE = ROOT / ".clawhubignore"
 
 
-def write_archive(path: Path, version: str, members: dict[str, str]) -> None:
-    package_json = json.dumps({"name": "openclaw", "version": version})
+def write_archive(
+    path: Path,
+    version: str,
+    members: dict[str, str],
+    package_metadata: dict[str, object] | None = None,
+) -> None:
+    package_document: dict[str, object] = {"name": "openclaw", "version": version}
+    package_document.update(package_metadata or {})
+    package_json = json.dumps(package_document)
     values = {"package/package.json": package_json, **members}
     with tarfile.open(path, "w:gz") as archive:
         for name, text in values.items():
@@ -57,6 +64,7 @@ class SafeUpdateTest(unittest.TestCase):
                 "package/extensions/signal/index.js": "signal old\n",
                 "package/removed.js": "removed\n",
             },
+            {"engines": {"node": ">=22.0.0"}},
         )
         write_archive(
             self.target_archive,
@@ -66,6 +74,7 @@ class SafeUpdateTest(unittest.TestCase):
                 "package/extensions/signal/index.js": "signal new\n",
                 "package/added.js": "added\n",
             },
+            {"engines": {"node": ">=22.0.0"}},
         )
         metadata = {
             "schema": "openclaw.safe_update.input.v1",
@@ -116,6 +125,37 @@ class SafeUpdateTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        self.coverage = self.root / "coverage.json"
+        self.coverage.write_text(
+            json.dumps(
+                {
+                    "schema": "openclaw.safe_update.coverage.v1",
+                    "install_shape": "npm_global_linux",
+                    "runtime": {"node_version": "22.14.0"},
+                    "surfaces": [
+                        {
+                            "id": "signal",
+                            "category": "channel",
+                            "required": True,
+                            "customization_checks": ["signal-entrypoint"],
+                            "post_update_checks": [
+                                "inbound text reaches the agent",
+                                "outbound reply reaches Signal",
+                                "voice note is transcribed",
+                            ],
+                        },
+                        {
+                            "id": "conversation-runtime",
+                            "category": "persona",
+                            "required": True,
+                            "customization_checks": ["runtime-hook"],
+                            "post_update_checks": ["casual conversation preserves the expected voice"],
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -130,6 +170,8 @@ class SafeUpdateTest(unittest.TestCase):
                 str(self.input),
                 "--output-dir",
                 str(self.root / "output"),
+                "--coverage",
+                str(self.coverage),
                 *extra,
             ],
             capture_output=True,
@@ -144,6 +186,8 @@ class SafeUpdateTest(unittest.TestCase):
         verdict = json.loads((output / "verdict.json").read_text())
         evidence = json.loads((output / "evidence-bundle.json").read_text())
         synthetic = json.loads((output / "synthetic-update.json").read_text())
+        coverage = json.loads((output / "coverage-report.json").read_text())
+        postchecks = json.loads((output / "post-upgrade-e2e.json").read_text())
         self.assertEqual(verdict["verdict"], "ready_for_operator_plan")
         self.assertFalse(verdict["production_apply_allowed"])
         self.assertFalse(verdict["operator_approval"])
@@ -151,6 +195,10 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertEqual(verdict["external_write_effect"], "none")
         self.assertEqual(evidence["repair_class"], "openclaw_upgrade")
         self.assertTrue(all(item["status"] == "success" for item in evidence["evidence"]))
+        self.assertEqual(coverage["status"], "success")
+        self.assertEqual(len(postchecks["surfaces"]), 2)
+        self.assertTrue((output / "operator-plan.md").is_file())
+        self.assertIn("STOP BEFORE APPLY", (output / "operator-plan.md").read_text())
         diff = synthetic["packages"][0]["diff"]
         self.assertIn("package/added.js", diff["added"]["members"])
         self.assertIn("package/removed.js", diff["removed"]["members"])
@@ -162,6 +210,98 @@ class SafeUpdateTest(unittest.TestCase):
         custom = json.loads((self.root / "output" / "customization-compatibility.json").read_text())
         self.assertEqual(verdict["verdict"], "blocked")
         self.assertEqual(custom["mode"], "missing")
+
+    def test_missing_coverage_profile_blocks(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "simulate",
+                "--input-dir",
+                str(self.input),
+                "--customizations",
+                str(self.customizations),
+                "--output-dir",
+                str(self.root / "no-coverage-output"),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        coverage = json.loads((self.root / "no-coverage-output" / "coverage-report.json").read_text())
+        self.assertEqual(coverage["status"], "failed")
+        self.assertIn("coverage profile is required", coverage["errors"])
+
+    def test_coverage_rejects_required_surface_without_postcheck(self) -> None:
+        value = json.loads(self.coverage.read_text())
+        value["surfaces"][0]["post_update_checks"] = []
+        self.coverage.write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_simulation("--customizations", str(self.customizations))
+        self.assertEqual(result.returncode, 2)
+        coverage = json.loads((self.root / "output" / "coverage-report.json").read_text())
+        self.assertTrue(any("post-update check" in error for error in coverage["errors"]))
+
+    def test_incompatible_runtime_node_blocks(self) -> None:
+        value = json.loads(self.coverage.read_text())
+        value["runtime"]["node_version"] = "20.18.0"
+        self.coverage.write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_simulation("--customizations", str(self.customizations))
+        self.assertEqual(result.returncode, 2)
+        synthetic = json.loads((self.root / "output" / "synthetic-update.json").read_text())
+        risks = synthetic["packages"][0]["package_metadata"]["risk_findings"]
+        self.assertTrue(any(item["id"] == "target-node-engine-incompatible" for item in risks))
+
+    def test_lifecycle_script_change_blocks(self) -> None:
+        write_archive(
+            self.target_archive,
+            "1.1.0",
+            {
+                "package/dist/runtime.js": "const agentRuntime = 'new';\n",
+                "package/extensions/signal/index.js": "signal new\n",
+            },
+            {"engines": {"node": ">=22.0.0"}, "scripts": {"postinstall": "node download.js"}},
+        )
+        metadata_path = self.input / "input-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["packages"][0]["target"]["integrity"] = integrity(self.target_archive)
+        metadata["packages"][0]["target"]["shasum"] = hashlib.sha1(self.target_archive.read_bytes()).hexdigest()
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        result = self.run_simulation("--customizations", str(self.customizations))
+        self.assertEqual(result.returncode, 2)
+        synthetic = json.loads((self.root / "output" / "synthetic-update.json").read_text())
+        risks = synthetic["packages"][0]["package_metadata"]["risk_findings"]
+        self.assertTrue(any(item["id"] == "lifecycle-script-changed" for item in risks))
+
+    def test_inventory_writes_public_safe_draft_profiles(self) -> None:
+        package_root = self.root / "installed" / "openclaw"
+        package_root.mkdir(parents=True)
+        (package_root / "package.json").write_text(
+            json.dumps({"name": "openclaw", "version": "1.0.0", "engines": {"node": ">=22"}}),
+            encoding="utf-8",
+        )
+        output = self.root / "inventory"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "inventory",
+                "--package-root",
+                str(package_root),
+                "--output-dir",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        inventory = json.loads((output / "inventory.json").read_text())
+        coverage = json.loads((output / "coverage.draft.json").read_text())
+        self.assertEqual(inventory["installed_version"], "1.0.0")
+        self.assertEqual(coverage["schema"], "openclaw.safe_update.coverage.v1")
+        self.assertEqual(coverage["surfaces"], [])
+        self.assertFalse(inventory["production_apply_allowed"])
 
     def test_integrity_mismatch_blocks(self) -> None:
         with self.target_archive.open("ab") as handle:
@@ -218,6 +358,10 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertIn("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", text)
         self.assertNotIn("uses: actions/checkout@v4", text)
         self.assertIn("ready_for_operator_plan", text)
+        self.assertIn("COVERAGE_FILE", text)
+        self.assertIn("coverage-report.json", text)
+        self.assertIn("post-upgrade-e2e.json", text)
+        self.assertIn("operator-plan.md", text)
 
     def test_fetch_pins_public_npm_registry(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
@@ -238,6 +382,11 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertIn("ready_for_operator_plan", readme)
         self.assertIn("does not update OpenClaw", readme)
         self.assertIn("forward recovery", readme)
+        self.assertIn("Know what will break before it breaks", readme)
+        self.assertIn("No two real OpenClaw installations are quite the same", readme)
+        self.assertIn("coverage-report.json", readme)
+        self.assertIn("post-upgrade-e2e.json", readme)
+        self.assertIn("planned for\n1.2", readme)
         self.assertIn("upgrade-experience.yml", readme)
         self.assertIn("MIT License", LICENSE.read_text(encoding="utf-8"))
         issue_template = UPGRADE_ISSUE_TEMPLATE.read_text(encoding="utf-8")
@@ -252,6 +401,7 @@ class SafeUpdateTest(unittest.TestCase):
         validate_workflow = VALIDATE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("clawhub@0.23.1 skill publish", validate_workflow)
         self.assertIn("--slug safe-upgrade-rehearsal", validate_workflow)
+        self.assertIn("--version 1.1.0", validate_workflow)
         self.assertNotIn("--slug openclaw-", validate_workflow)
         self.assertIn("--dry-run", validate_workflow)
         self.assertNotIn("CLAWHUB_TOKEN", validate_workflow)

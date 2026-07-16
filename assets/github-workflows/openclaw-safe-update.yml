@@ -26,6 +26,11 @@ on:
         required: true
         default: true
         type: boolean
+      coverage-file:
+        description: Repository-relative installation coverage profile
+        required: true
+        default: .openclaw-safe-update/coverage.json
+        type: string
   workflow_call:
     inputs:
       current-version:
@@ -46,6 +51,10 @@ on:
         required: false
         default: true
         type: boolean
+      coverage-file:
+        required: false
+        default: .openclaw-safe-update/coverage.json
+        type: string
 
 permissions:
   contents: read
@@ -60,6 +69,7 @@ jobs:
       PACKAGES_JSON: ${{ inputs['packages-json'] }}
       CUSTOMIZATIONS_FILE: ${{ inputs['customizations-file'] }}
       REQUIRE_CUSTOMIZATIONS: ${{ inputs['require-customizations'] }}
+      COVERAGE_FILE: ${{ inputs['coverage-file'] }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -91,6 +101,9 @@ jobs:
             --input-dir artifacts/input
             --output-dir artifacts/safe-update
           )
+          if [[ -f "$COVERAGE_FILE" ]]; then
+            arguments+=(--coverage "$COVERAGE_FILE")
+          fi
           if [[ -f "$CUSTOMIZATIONS_FILE" ]]; then
             arguments+=(--customizations "$CUSTOMIZATIONS_FILE")
           elif [[ "$REQUIRE_CUSTOMIZATIONS" != "true" ]]; then
@@ -108,9 +121,12 @@ jobs:
             artifacts/safe-update/runtime-truth.json
             artifacts/safe-update/synthetic-update.json
             artifacts/safe-update/customization-compatibility.json
+            artifacts/safe-update/coverage-report.json
+            artifacts/safe-update/post-upgrade-e2e.json
             artifacts/safe-update/evidence-bundle.json
             artifacts/safe-update/verdict.json
             artifacts/safe-update/summary.md
+            artifacts/safe-update/operator-plan.md
           if-no-files-found: error
           retention-days: 14
 
