@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/pdurlej/openclaw-skill-safe-update/actions/workflows/validate.yml"><img alt="Validate skill" src="https://github.com/pdurlej/openclaw-skill-safe-update/actions/workflows/validate.yml/badge.svg"></a>
   <a href="https://github.com/pdurlej/openclaw-skill-safe-update/actions/workflows/validate.yml"><img alt="OpenClaw skill validated" src="https://img.shields.io/badge/OpenClaw%20skill-validated-7aa82b"></a>
-  <a href="https://clawhub.ai/pdurlej/openclaw-safe-update"><img alt="Available on ClawHub" src="https://img.shields.io/badge/ClawHub-published-7aa82b"></a>
+  <a href="https://clawhub.ai/pdurlej/safe-upgrade-rehearsal"><img alt="Available on ClawHub" src="https://img.shields.io/badge/ClawHub-published-7aa82b"></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-7aa82b"></a>
   <img alt="Dry run only" src="https://img.shields.io/badge/mode-dry%20run%20only-222222">
 </p>
@@ -47,8 +47,8 @@ will contribute another set of field notes here.
 Install the published skill and verify its ClawHub trust envelope:
 
 ```bash
-openclaw skills install @pdurlej/openclaw-safe-update
-openclaw skills verify @pdurlej/openclaw-safe-update --card
+openclaw skills install @pdurlej/safe-upgrade-rehearsal
+openclaw skills verify @pdurlej/safe-upgrade-rehearsal --card
 ```
 
 ### OpenClaw via Git

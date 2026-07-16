@@ -24,7 +24,7 @@ jobs:
           NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
         run: |
           npx --yes clawhub@0.23.1 skill publish . \
-            --slug openclaw-safe-update \
+            --slug safe-upgrade-rehearsal \
             --name "OpenClaw Safe Upgrade Rehearsal Kit" \
             --owner pdurlej \
             --topics "dry-run,upgrade-rehearsal,release-engineering,supply-chain-security" \
