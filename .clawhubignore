@@ -1,7 +1,9 @@
 .git/
 .github/
 README.md
+CHANGELOG.md
 assets/brand/
+examples/
 tests/
 __pycache__/
 *.pyc

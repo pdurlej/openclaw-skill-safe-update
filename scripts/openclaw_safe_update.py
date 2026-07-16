@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -21,12 +22,35 @@ from typing import Any
 EFFECT = "read_only_openclaw_update_rehearsal"
 INPUT_SCHEMA = "openclaw.safe_update.input.v1"
 CUSTOMIZATIONS_SCHEMA = "openclaw.safe_update.customizations.v1"
+COVERAGE_SCHEMA = "openclaw.safe_update.coverage.v1"
 PACKAGE_RE = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 MAX_TEXT_MEMBER_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_MEMBER_BYTES = 512 * 1024 * 1024
 DIFF_MEMBER_LIMIT = 250
 NPM_REGISTRY = "https://registry.npmjs.org"
+SUPPORTED_INSTALL_SHAPES = {"npm_global_linux"}
+SURFACE_CATEGORIES = {
+    "attachment",
+    "channel",
+    "mcp",
+    "memory",
+    "other",
+    "persona",
+    "plugin",
+    "provider",
+    "service",
+    "voice",
+}
+PACKAGE_METADATA_FIELDS = (
+    "engines",
+    "dependencies",
+    "optionalDependencies",
+    "peerDependencies",
+    "scripts",
+    "bin",
+)
+LIFECYCLE_SCRIPTS = {"preinstall", "install", "postinstall", "prepack", "prepare"}
 
 
 class RehearsalError(RuntimeError):
@@ -73,6 +97,78 @@ def write_text(path: Path, value: str) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def detect_node_version() -> str:
+    try:
+        completed = subprocess.run(
+            ["node", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        candidate = completed.stdout.strip().removeprefix("v")
+        if VERSION_RE.fullmatch(candidate):
+            return candidate
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pass
+    return "unknown"
+
+
+def inventory(args: argparse.Namespace) -> int:
+    package_root = args.package_root.resolve()
+    package_json_path = package_root / "package.json"
+    package_json = read_json(package_json_path)
+    if not isinstance(package_json, dict):
+        raise RehearsalError("installed package.json must be an object")
+    if package_json.get("name") != args.package_name:
+        raise RehearsalError(f"installed package is not {args.package_name}")
+    version = package_json.get("version")
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+        raise RehearsalError("installed package version is not exact semver")
+
+    node_version = detect_node_version()
+
+    output = args.output_dir.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    common = {"generated_at": now_iso(), **safety_fields()}
+    inventory_document = {
+        "schema": "openclaw.safe_update.inventory.v1",
+        **common,
+        "status": "success",
+        "package_name": args.package_name,
+        "installed_version": version,
+        "package_root_name": package_root.name,
+        "host": {
+            "platform": platform.system().lower(),
+            "machine": platform.machine(),
+            "node_version": node_version,
+        },
+        "declared_node_engine": (package_json.get("engines") or {}).get("node")
+        if isinstance(package_json.get("engines"), dict)
+        else None,
+        "note": "No OpenClaw configuration, credentials, conversations, or service state were read.",
+    }
+    coverage_draft = {
+        "schema": COVERAGE_SCHEMA,
+        "install_shape": "npm_global_linux",
+        "runtime": {"node_version": node_version},
+        "surfaces": [],
+        "draft": True,
+        "instructions": (
+            "Add every required channel, plugin, MCP, memory, provider, service, persona, "
+            "attachment, and voice surface before simulation."
+        ),
+    }
+    packages_draft = [
+        {"name": args.package_name, "current": version, "target": "REPLACE_WITH_EXACT_VERSION"}
+    ]
+    write_json(output / "inventory.json", inventory_document)
+    write_json(output / "coverage.draft.json", coverage_draft)
+    write_json(output / "packages.draft.json", packages_draft)
+    print(output / "inventory.json")
+    return 0
 
 
 def digest_file(path: Path, algorithm: str = "sha256") -> str:
@@ -324,6 +420,199 @@ def compare_archives(current: dict[str, Any], target: dict[str, Any]) -> dict[st
     }
 
 
+def semver_tuple(value: str) -> tuple[int, int, int] | None:
+    candidate = value.removeprefix("v").split("-", 1)[0].split("+", 1)[0]
+    parts = candidate.split(".")
+    if not 1 <= len(parts) <= 3 or any(not part.isdigit() for part in parts):
+        return None
+    values = [int(part) for part in parts]
+    return tuple((values + [0, 0])[:3])
+
+
+def node_version_satisfies(version: str, expression: str) -> bool | None:
+    actual = semver_tuple(version)
+    if actual is None or not isinstance(expression, str) or not expression.strip():
+        return None
+    outcomes: list[bool | None] = []
+    for alternative in expression.split("||"):
+        clauses = alternative.strip().split()
+        if not clauses:
+            continue
+        clause_outcomes: list[bool] = []
+        for clause in clauses:
+            match = re.fullmatch(r"(>=|<=|>|<|=|\^|~)?v?(\d+(?:\.\d+){0,2})(?:\.x)?", clause)
+            if not match:
+                outcomes.append(None)
+                clause_outcomes = []
+                break
+            operator = match.group(1) or "="
+            expected = semver_tuple(match.group(2))
+            if expected is None:
+                return None
+            if operator == ">=":
+                clause_outcomes.append(actual >= expected)
+            elif operator == "<=":
+                clause_outcomes.append(actual <= expected)
+            elif operator == ">":
+                clause_outcomes.append(actual > expected)
+            elif operator == "<":
+                clause_outcomes.append(actual < expected)
+            elif operator == "^":
+                clause_outcomes.append(actual >= expected and actual[0] == expected[0])
+            elif operator == "~":
+                clause_outcomes.append(actual >= expected and actual[:2] == expected[:2])
+            else:
+                specified_parts = len(match.group(2).split("."))
+                clause_outcomes.append(actual[:specified_parts] == expected[:specified_parts])
+        if clause_outcomes:
+            outcomes.append(all(clause_outcomes))
+    if True in outcomes:
+        return True
+    if outcomes and all(outcome is False for outcome in outcomes):
+        return False
+    return None
+
+
+def compare_package_metadata(
+    current: dict[str, Any], target: dict[str, Any], runtime_node_version: str | None
+) -> dict[str, Any]:
+    current_values = {field: current.get(field) for field in PACKAGE_METADATA_FIELDS}
+    target_values = {field: target.get(field) for field in PACKAGE_METADATA_FIELDS}
+    changed_fields = [
+        field for field in PACKAGE_METADATA_FIELDS if current_values[field] != target_values[field]
+    ]
+    findings: list[dict[str, str]] = []
+
+    current_scripts = (
+        current_values.get("scripts") if isinstance(current_values.get("scripts"), dict) else {}
+    )
+    target_scripts = (
+        target_values.get("scripts") if isinstance(target_values.get("scripts"), dict) else {}
+    )
+    changed_lifecycle = sorted(
+        name
+        for name in LIFECYCLE_SCRIPTS
+        if current_scripts.get(name) != target_scripts.get(name)
+    )
+    if changed_lifecycle:
+        findings.append(
+            {
+                "id": "lifecycle-script-changed",
+                "severity": "blocked",
+                "detail": "Lifecycle scripts changed: " + ", ".join(changed_lifecycle),
+            }
+        )
+
+    target_engines = target_values.get("engines")
+    target_node_engine = target_engines.get("node") if isinstance(target_engines, dict) else None
+    if isinstance(target_node_engine, str):
+        compatibility = node_version_satisfies(runtime_node_version or "", target_node_engine)
+        if compatibility is False:
+            findings.append(
+                {
+                    "id": "target-node-engine-incompatible",
+                    "severity": "blocked",
+                    "detail": f"Runtime Node {runtime_node_version} does not satisfy target engines.node {target_node_engine}",
+                }
+            )
+        elif compatibility is None:
+            findings.append(
+                {
+                    "id": "target-node-engine-unproven",
+                    "severity": "blocked",
+                    "detail": f"Cannot prove runtime Node {runtime_node_version or 'unknown'} satisfies target engines.node {target_node_engine}",
+                }
+            )
+
+    return {
+        "current": current_values,
+        "target": target_values,
+        "changed_fields": changed_fields,
+        "risk_findings": findings,
+    }
+
+
+def load_coverage(
+    path: Path | None, allow_none: bool
+) -> tuple[dict[str, Any], list[str], str]:
+    empty = {"install_shape": None, "runtime": {}, "surfaces": []}
+    if path is None:
+        if allow_none:
+            return empty, [], "explicitly_not_required"
+        return empty, ["coverage profile is required"], "missing"
+    try:
+        value = read_json(path)
+    except RehearsalError as exc:
+        return empty, [str(exc)], "invalid"
+    if not isinstance(value, dict) or value.get("schema") != COVERAGE_SCHEMA:
+        return empty, [f"coverage schema must be {COVERAGE_SCHEMA}"], "invalid"
+
+    errors: list[str] = []
+    install_shape = value.get("install_shape")
+    if install_shape not in SUPPORTED_INSTALL_SHAPES:
+        errors.append(f"unsupported install shape: {install_shape}")
+    runtime = value.get("runtime")
+    if not isinstance(runtime, dict):
+        errors.append("coverage runtime must be an object")
+        runtime = {}
+    node_version = runtime.get("node_version")
+    if not isinstance(node_version, str) or semver_tuple(node_version) is None:
+        errors.append("coverage runtime.node_version must be an exact version")
+
+    surfaces = value.get("surfaces")
+    if not isinstance(surfaces, list):
+        return empty, errors + ["coverage surfaces must be a list"], "invalid"
+    if not surfaces and not allow_none:
+        errors.append("coverage profile must declare at least one surface")
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, surface in enumerate(surfaces):
+        if not isinstance(surface, dict):
+            errors.append(f"coverage surface {index} must be an object")
+            continue
+        surface_id = surface.get("id")
+        category = surface.get("category")
+        required = surface.get("required")
+        customization_checks = surface.get("customization_checks", [])
+        post_update_checks = surface.get("post_update_checks")
+        if not isinstance(surface_id, str) or not surface_id or surface_id in seen:
+            errors.append(f"coverage surface {index} has an invalid or duplicate id")
+            continue
+        seen.add(surface_id)
+        if category not in SURFACE_CATEGORIES:
+            errors.append(f"coverage surface {surface_id} has unsupported category")
+            continue
+        if not isinstance(required, bool):
+            errors.append(f"coverage surface {surface_id} must declare required as boolean")
+            continue
+        if not isinstance(customization_checks, list) or any(
+            not isinstance(item, str) or not item for item in customization_checks
+        ):
+            errors.append(f"coverage surface {surface_id} has invalid customization checks")
+            continue
+        if not isinstance(post_update_checks, list) or any(
+            not isinstance(item, str) or not item.strip() for item in post_update_checks
+        ):
+            errors.append(f"coverage surface {surface_id} has invalid post-update checks")
+            continue
+        if required and not post_update_checks:
+            errors.append(f"required coverage surface {surface_id} needs a post-update check")
+        normalized.append(
+            {
+                "id": surface_id,
+                "category": category,
+                "required": required,
+                "customization_checks": customization_checks,
+                "post_update_checks": post_update_checks,
+            }
+        )
+    return {
+        "install_shape": install_shape,
+        "runtime": {"node_version": node_version},
+        "surfaces": normalized,
+    }, errors, "configured"
+
+
 def load_customizations(path: Path | None, allow_none: bool) -> tuple[list[dict[str, Any]], list[str], str]:
     if path is None:
         if allow_none:
@@ -389,6 +678,21 @@ def simulate(args: argparse.Namespace) -> int:
     runtime_errors: list[str] = []
     package_results: list[dict[str, Any]] = []
     target_archives: dict[str, tuple[Path, dict[str, Any], dict[str, Any]]] = {}
+    coverage_profile, coverage_errors, coverage_mode = load_coverage(
+        args.coverage.resolve() if args.coverage else None,
+        args.allow_no_coverage,
+    )
+    if coverage_mode == "explicitly_not_required":
+        if (
+            not isinstance(args.runtime_node_version, str)
+            or semver_tuple(args.runtime_node_version) is None
+        ):
+            coverage_errors.append(
+                "--runtime-node-version is required when --allow-no-coverage is used"
+            )
+        else:
+            coverage_profile["runtime"]["node_version"] = args.runtime_node_version
+    runtime_node_version = coverage_profile.get("runtime", {}).get("node_version")
 
     try:
         metadata = read_json(metadata_path)
@@ -423,6 +727,16 @@ def simulate(args: argparse.Namespace) -> int:
             target_path = archive_path(input_dir, "target", target_metadata)
             current_inspection = verify_archive(current_path, current_metadata)
             target_inspection = verify_archive(target_path, target_metadata)
+            package_metadata = compare_package_metadata(
+                current_inspection["package_json"],
+                target_inspection["package_json"],
+                runtime_node_version,
+            )
+            blocking_findings = [
+                finding
+                for finding in package_metadata["risk_findings"]
+                if finding.get("severity") == "blocked"
+            ]
             package_result.update(
                 {
                     "current_version": current_metadata["version"],
@@ -440,10 +754,12 @@ def simulate(args: argparse.Namespace) -> int:
                         },
                     },
                     "diff": compare_archives(current_inspection, target_inspection),
-                    "status": "success",
+                    "package_metadata": package_metadata,
+                    "status": "failed" if blocking_findings else "success",
                 }
             )
             target_archives[name] = (target_path, target_inspection, target_metadata)
+            package_result["errors"].extend(finding["detail"] for finding in blocking_findings)
         except (KeyError, RehearsalError, OSError, tarfile.TarError) as exc:
             package_result["errors"].append(str(exc))
         package_results.append(package_result)
@@ -526,14 +842,74 @@ def simulate(args: argparse.Namespace) -> int:
         "errors": customization_errors,
     }
 
+    customization_results_by_id = {item["id"]: item["status"] for item in check_results}
+    known_customization_ids = set(customization_results_by_id)
+    coverage_surface_results: list[dict[str, Any]] = []
+    for surface in coverage_profile["surfaces"]:
+        surface_errors: list[str] = []
+        for check_id in surface["customization_checks"]:
+            if check_id not in known_customization_ids:
+                surface_errors.append(f"referenced customization check is missing: {check_id}")
+            elif customization_results_by_id[check_id] != "success":
+                surface_errors.append(f"referenced customization check failed: {check_id}")
+        coverage_surface_results.append(
+            {
+                **surface,
+                "status": "failed" if surface_errors else "success",
+                "errors": surface_errors,
+            }
+        )
+        coverage_errors.extend(f"surface {surface['id']}: {error}" for error in surface_errors)
+    coverage_status = (
+        "success"
+        if not coverage_errors and all(item["status"] == "success" for item in coverage_surface_results)
+        else "failed"
+    )
+    coverage_report = {
+        "schema": "openclaw.safe_update.coverage_report.v1",
+        **common,
+        "status": coverage_status,
+        "mode": coverage_mode,
+        "install_shape": coverage_profile["install_shape"],
+        "runtime": coverage_profile["runtime"],
+        "surfaces": coverage_surface_results,
+        "errors": coverage_errors,
+    }
+    postcheck_plan = {
+        "schema": "openclaw.safe_update.post_upgrade_e2e.v1",
+        **common,
+        "status": "success" if coverage_status == "success" else "failed",
+        "execution_status": "not_run",
+        "surfaces": [
+            {
+                "id": surface["id"],
+                "category": surface["category"],
+                "required": surface["required"],
+                "checks": [
+                    {"description": check, "status": "not_run"}
+                    for check in surface["post_update_checks"]
+                ],
+            }
+            for surface in coverage_surface_results
+        ],
+        "note": "This is a post-upgrade test plan, not evidence that the checks have run.",
+    }
+
     runtime_path = output_dir / "runtime-truth.json"
     synthetic_path = output_dir / "synthetic-update.json"
     customization_path = output_dir / "customization-compatibility.json"
+    coverage_path = output_dir / "coverage-report.json"
+    postcheck_path = output_dir / "post-upgrade-e2e.json"
     write_json(runtime_path, runtime_truth)
     write_json(synthetic_path, synthetic)
     write_json(customization_path, customizations)
+    write_json(coverage_path, coverage_report)
+    write_json(postcheck_path, postcheck_plan)
 
-    blocked = any(status != "success" for status in (runtime_status, synthetic_status, customization_status))
+    blocked = any(
+        status != "success"
+        for status in (runtime_status, synthetic_status, customization_status, coverage_status)
+    )
     verdict_value = "blocked" if blocked else "ready_for_operator_plan"
     evidence = {
         "schema": "openclaw.safe_update.evidence_bundle.v1",
@@ -544,6 +920,8 @@ def simulate(args: argparse.Namespace) -> int:
             artifact_reference(runtime_path, runtime_status),
             artifact_reference(synthetic_path, synthetic_status),
             artifact_reference(customization_path, customization_status),
+            artifact_reference(coverage_path, coverage_status),
+            artifact_reference(postcheck_path, postcheck_plan["status"]),
         ],
     }
     evidence_path = output_dir / "evidence-bundle.json"
@@ -553,7 +931,7 @@ def simulate(args: argparse.Namespace) -> int:
         **common,
         "verdict": verdict_value,
         "reason": (
-            "required package or customization evidence failed"
+            "required package, customization, runtime, or installation coverage evidence failed"
             if blocked
             else "package-level rehearsal passed; live mutation still requires an operator plan and approval"
         ),
@@ -566,6 +944,28 @@ def simulate(args: argparse.Namespace) -> int:
     }
     verdict_path = output_dir / "verdict.json"
     write_json(verdict_path, verdict)
+    operator_plan = (
+        "# OpenClaw Upgrade Operator Plan\n\n"
+        "## STOP BEFORE APPLY\n\n"
+        "This rehearsal does not authorize or execute an upgrade. A human operator must review "
+        "the evidence, choose a maintenance window, verify a lossless rollback, and separately approve "
+        "the exact mutation.\n\n"
+        f"- Verdict: `{verdict_value}`\n"
+        f"- Current version: `{metadata.get('current_version', 'unknown')}`\n"
+        f"- Target version: `{metadata.get('target_version', 'unknown')}`\n"
+        f"- Install shape: `{coverage_profile.get('install_shape') or 'unknown'}`\n"
+        f"- Evidence bundle: `{evidence_path.name}` (`{digest_file(evidence_path)}`)\n"
+        f"- Post-upgrade E2E plan: `{postcheck_path.name}`\n\n"
+        "## Required operator inputs\n\n"
+        "- Exact maintenance window\n"
+        "- Verified backup and lossless rollback command\n"
+        "- Exact update command and affected paths\n"
+        "- Separate approval for update, restart, or deploy\n\n"
+        "## Exit criteria\n\n"
+        "Every required post-upgrade check must be recorded as passed. Any failed or unproven surface "
+        "means rollback or forward recovery, not acceptance.\n"
+    )
+    write_text(output_dir / "operator-plan.md", operator_plan)
     summary = (
         "# OpenClaw Safe Update Rehearsal\n\n"
         f"- Verdict: `{verdict_value}`\n"
@@ -574,6 +974,8 @@ def simulate(args: argparse.Namespace) -> int:
         f"- Runtime evidence: `{runtime_status}`\n"
         f"- Package evidence: `{synthetic_status}`\n"
         f"- Customization evidence: `{customization_status}`\n"
+        f"- Installation coverage: `{coverage_status}`\n"
+        f"- Declared surfaces: `{len(coverage_surface_results)}`\n"
         "- Runtime effect: `none`\n"
         "- Production apply allowed: `false`\n"
         "- Operator approval: `false`\n\n"
@@ -588,6 +990,14 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     subcommands = root.add_subparsers(dest="command", required=True)
 
+    inventory_parser = subcommands.add_parser(
+        "inventory", help="create a public-safe local installation inventory and coverage draft"
+    )
+    inventory_parser.add_argument("--package-root", type=Path, required=True)
+    inventory_parser.add_argument("--package-name", default="openclaw")
+    inventory_parser.add_argument("--output-dir", type=Path, required=True)
+    inventory_parser.set_defaults(handler=inventory)
+
     fetch_parser = subcommands.add_parser("fetch", help="fetch immutable npm package evidence")
     fetch_parser.add_argument("--current-version", required=True)
     fetch_parser.add_argument("--target-version", required=True)
@@ -599,6 +1009,9 @@ def parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--input-dir", type=Path, required=True)
     simulate_parser.add_argument("--customizations", type=Path)
     simulate_parser.add_argument("--allow-no-customizations", action="store_true")
+    simulate_parser.add_argument("--coverage", type=Path)
+    simulate_parser.add_argument("--allow-no-coverage", action="store_true")
+    simulate_parser.add_argument("--runtime-node-version")
     simulate_parser.add_argument("--output-dir", type=Path, required=True)
     simulate_parser.set_defaults(handler=simulate)
     return root
