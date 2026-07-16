@@ -45,7 +45,7 @@ OpenClaw supports Git-backed skills directly:
 
 ```bash
 openclaw skills install git:pdurlej/openclaw-skill-safe-update@main
-openclaw skills verify openclaw-safe-update
+openclaw skills info openclaw-safe-update
 ```
 
 Then ask:
