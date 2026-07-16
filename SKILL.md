@@ -3,7 +3,7 @@ name: openclaw-safe-update
 description: Rehearse an OpenClaw version update without touching a live runtime. Use when comparing current and target OpenClaw packages, checking customized Signal, Matrix, MCP, provider, or runtime integration surfaces, producing synthetic-update evidence, preparing a Patchwarden-compatible review bundle, or writing a rollback-aware operator plan before an update.
 ---
 
-# OpenClaw Safe Update
+# OpenClaw Safe Upgrade Rehearsal Kit
 
 Prepare evidence for an OpenClaw update while keeping production unchanged. Treat the generated verdict as input to an operator decision, never as permission to update.
 

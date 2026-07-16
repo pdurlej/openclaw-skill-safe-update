@@ -15,6 +15,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "openclaw_safe_update.py"
 WORKFLOW = ROOT / "assets" / "github-workflows" / "openclaw-safe-update.yml"
+README = ROOT / "README.md"
+LICENSE = ROOT / "LICENSE"
+UPGRADE_ISSUE_TEMPLATE = ROOT / ".github" / "ISSUE_TEMPLATE" / "upgrade-experience.yml"
+HERO = ROOT / "assets" / "brand" / "openclaw-safe-upgrade-hero.png"
 
 
 def write_archive(path: Path, version: str, members: dict[str, str]) -> None:
@@ -217,6 +221,22 @@ class SafeUpdateTest(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('NPM_REGISTRY = "https://registry.npmjs.org"', text)
         self.assertIn('"NPM_CONFIG_REGISTRY": NPM_REGISTRY', text)
+
+    def test_public_product_surface_preserves_rehearsal_boundary(self) -> None:
+        readme = README.read_text(encoding="utf-8")
+        self.assertIn("OpenClaw Safe Upgrade Rehearsal Kit", readme)
+        self.assertIn("openclaw skills install git:pdurlej/openclaw-skill-safe-update@main", readme)
+        self.assertIn("ready_for_operator_plan", readme)
+        self.assertIn("It does not update OpenClaw", readme)
+        self.assertIn("forward recovery", readme)
+        self.assertIn("upgrade-experience.yml", readme)
+        self.assertIn("MIT License", LICENSE.read_text(encoding="utf-8"))
+        issue_template = UPGRADE_ISSUE_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("upgrade-report", issue_template)
+        self.assertIn("I removed secrets", issue_template)
+        self.assertIn("green rehearsal is not approval", issue_template)
+        self.assertGreater(HERO.stat().st_size, 100_000)
+        self.assertEqual(HERO.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
 
 if __name__ == "__main__":
