@@ -1,6 +1,6 @@
 interface:
-  display_name: "OpenClaw Safe Update"
-  short_description: "Rehearse OpenClaw updates without touching runtime"
+  display_name: "OpenClaw Safe Upgrade Rehearsal"
+  short_description: "Build fail-closed evidence before an OpenClaw upgrade"
   default_prompt: "Use $openclaw-safe-update to rehearse an OpenClaw update and produce fail-closed evidence."
 policy:
   allow_implicit_invocation: true

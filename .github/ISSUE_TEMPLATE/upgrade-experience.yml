@@ -1,0 +1,75 @@
+name: OpenClaw upgrade experience
+description: Share a successful upgrade, blocker, regression, or reusable lesson.
+title: "[upgrade] "
+labels:
+  - upgrade-report
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve safe OpenClaw upgrades. Share only sanitized technical evidence. Never include secrets, conversations, private audio, production databases, or unredacted configuration and logs.
+  - type: input
+    id: versions
+    attributes:
+      label: Current and target versions
+      description: Use exact versions, for example 2026.6.11 to 2026.7.1.
+      placeholder: 2026.6.11 -> 2026.7.1
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation shape
+      options:
+        - npm-global on Linux
+        - Docker or container
+        - Source checkout
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, Node version, and public package/plugin names.
+      placeholder: Ubuntu 24.04, x86_64, Node 24, Matrix and Signal plugins
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome
+      options:
+        - Successful and uneventful
+        - Successful with a workaround
+        - Blocked before activation
+        - Regressed after activation
+        - Forward recovery required
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: What happened?
+      description: Describe the phase, symptom, expected behavior, and observed behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Include public package coordinates, checksums, redacted error names, or links to a minimal reproduction.
+  - type: textarea
+    id: resolution
+    attributes:
+      label: Resolution or workaround
+      description: What fixed it, or what evidence is still missing?
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, tokens, private conversations, private audio, production databases, and unredacted configuration/logs.
+          required: true
+        - label: I understand that a green rehearsal is not approval to update a live runtime.
+          required: true
