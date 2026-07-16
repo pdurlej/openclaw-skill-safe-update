@@ -219,6 +219,11 @@ verdict.
 This is an independent community project and is not an official OpenClaw
 release or endorsement.
 
+## Contributors
+
+Created and maintained by [Piotr Durlej](https://github.com/pdurlej) with
+[Codex](https://openai.com/codex/).
+
 ## License
 
 [MIT](LICENSE)
