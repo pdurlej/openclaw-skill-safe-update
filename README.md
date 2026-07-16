@@ -10,9 +10,10 @@
 
 <p align="center">
   <a href="https://github.com/pdurlej/openclaw-skill-safe-update/actions/workflows/validate.yml"><img alt="Validate skill" src="https://github.com/pdurlej/openclaw-skill-safe-update/actions/workflows/validate.yml/badge.svg"></a>
+  <a href="https://github.com/pdurlej/openclaw-skill-safe-update/actions/workflows/validate.yml"><img alt="OpenClaw skill validated" src="https://img.shields.io/badge/OpenClaw%20skill-validated-7aa82b"></a>
+  <a href="https://clawhub.ai/pdurlej/openclaw-safe-update"><img alt="Available on ClawHub" src="https://img.shields.io/badge/ClawHub-published-7aa82b"></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-7aa82b"></a>
-  <img alt="Rehearsal only" src="https://img.shields.io/badge/runtime-rehearsal%20only-222222">
-  <img alt="Fail closed" src="https://img.shields.io/badge/verdict-fail%20closed-b42318">
+  <img alt="Dry run only" src="https://img.shields.io/badge/mode-dry%20run%20only-222222">
 </p>
 
 This project gives humans, Codex, and OpenClaw a repeatable way to inspect an
@@ -21,9 +22,11 @@ artifacts, verifies their identity and integrity, compares package surfaces,
 checks deployment-specific customizations, and emits a hash-bound evidence
 bundle.
 
-**It does not update OpenClaw.** It never deploys, restarts services, executes
-package lifecycle scripts, or treats a green report as permission to mutate
-production.
+**Dry run only:** this project does not update OpenClaw. It never deploys,
+restarts services, executes package lifecycle scripts, or treats a green report
+as permission to mutate production. When required evidence is missing or a
+compatibility check fails, it returns `blocked` and stops instead of guessing.
+That is what “fail closed” means here.
 
 ## Why this exists
 
@@ -39,7 +42,16 @@ will contribute another set of field notes here.
 
 ## Install as a skill
 
-### OpenClaw
+### OpenClaw via ClawHub
+
+Install the published skill and verify its ClawHub trust envelope:
+
+```bash
+openclaw skills install @pdurlej/openclaw-safe-update
+openclaw skills verify @pdurlej/openclaw-safe-update --card
+```
+
+### OpenClaw via Git
 
 OpenClaw supports Git-backed skills directly:
 

@@ -19,3 +19,14 @@ jobs:
         run: python3 -m py_compile scripts/openclaw_safe_update.py
       - name: Test
         run: python3 -m unittest discover -s tests -v
+      - name: Validate the OpenClaw skill package with ClawHub
+        env:
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
+        run: |
+          npx --yes clawhub@0.23.1 skill publish . \
+            --slug openclaw-safe-update \
+            --name "OpenClaw Safe Upgrade Rehearsal Kit" \
+            --owner pdurlej \
+            --topics "dry-run,upgrade-rehearsal,release-engineering,supply-chain-security" \
+            --dry-run \
+            --json

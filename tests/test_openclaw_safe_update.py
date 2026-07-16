@@ -15,10 +15,12 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "openclaw_safe_update.py"
 WORKFLOW = ROOT / "assets" / "github-workflows" / "openclaw-safe-update.yml"
+VALIDATE_WORKFLOW = ROOT / ".github" / "workflows" / "validate.yml"
 README = ROOT / "README.md"
 LICENSE = ROOT / "LICENSE"
 UPGRADE_ISSUE_TEMPLATE = ROOT / ".github" / "ISSUE_TEMPLATE" / "upgrade-experience.yml"
 HERO = ROOT / "assets" / "brand" / "openclaw-safe-upgrade-hero.png"
+CLAWHUB_IGNORE = ROOT / ".clawhubignore"
 
 
 def write_archive(path: Path, version: str, members: dict[str, str]) -> None:
@@ -227,8 +229,14 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertIn("OpenClaw Safe Upgrade Rehearsal Kit", readme)
         self.assertIn("openclaw skills install git:pdurlej/openclaw-skill-safe-update@main", readme)
         self.assertIn("openclaw skills info openclaw-safe-update", readme)
+        self.assertIn("openclaw skills install @pdurlej/openclaw-safe-update", readme)
+        self.assertIn("openclaw skills verify @pdurlej/openclaw-safe-update --card", readme)
+        self.assertIn("mode-dry%20run%20only", readme)
+        self.assertIn("OpenClaw%20skill-validated", readme)
+        self.assertNotIn("verdict-fail%20closed", readme)
+        self.assertIn("That is what “fail closed” means here", readme)
         self.assertIn("ready_for_operator_plan", readme)
-        self.assertIn("It does not update OpenClaw", readme)
+        self.assertIn("does not update OpenClaw", readme)
         self.assertIn("forward recovery", readme)
         self.assertIn("upgrade-experience.yml", readme)
         self.assertIn("MIT License", LICENSE.read_text(encoding="utf-8"))
@@ -238,6 +246,13 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertIn("green rehearsal is not approval", issue_template)
         self.assertGreater(HERO.stat().st_size, 100_000)
         self.assertEqual(HERO.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+        clawhub_ignore = CLAWHUB_IGNORE.read_text(encoding="utf-8")
+        self.assertIn("assets/brand/", clawhub_ignore)
+        self.assertIn("tests/", clawhub_ignore)
+        validate_workflow = VALIDATE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("clawhub@0.23.1 skill publish", validate_workflow)
+        self.assertIn("--dry-run", validate_workflow)
+        self.assertNotIn("CLAWHUB_TOKEN", validate_workflow)
 
 
 if __name__ == "__main__":
