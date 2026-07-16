@@ -226,6 +226,7 @@ class SafeUpdateTest(unittest.TestCase):
         readme = README.read_text(encoding="utf-8")
         self.assertIn("OpenClaw Safe Upgrade Rehearsal Kit", readme)
         self.assertIn("openclaw skills install git:pdurlej/openclaw-skill-safe-update@main", readme)
+        self.assertIn("openclaw skills info openclaw-safe-update", readme)
         self.assertIn("ready_for_operator_plan", readme)
         self.assertIn("It does not update OpenClaw", readme)
         self.assertIn("forward recovery", readme)
