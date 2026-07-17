@@ -146,6 +146,8 @@ SERVICE_POINTER_DIRECTIVES = (
 MAX_SERVICE_UNIT_BYTES = 64 * 1024
 CONSERVATIVE_INPUTS_SCHEMA = "openclaw.safe_update.conservative_inputs.v1"
 CONSERVATIVE_GATES_SCHEMA = "openclaw.safe_update.conservative_gates.v1"
+IMPACT_SHADOW_SCHEMA = "openclaw.safe_update.impact_shadow.v1"
+SHADOW_ID_PREFIX = "shadow:"
 GATE_HANDLING = {"baseline", "conservative", "blocked"}
 GATE_EVIDENCE_IDS = frozenset(
     {
@@ -1472,6 +1474,197 @@ def evaluate_conservative_gates(
         "errors": errors,
     }
     return report, status
+
+
+def build_impact_shadow(
+    *,
+    authority_packages: list[dict[str, Any]],
+    core_candidate_lock: dict[str, Any],
+    installation_contract: dict[str, Any],
+    baseline_check_ids: set[str],
+    authority_complete: bool,
+    common: dict[str, Any],
+) -> dict[str, Any]:
+    errors: list[str] = []
+    changed_members = sorted(
+        (
+            package["name"],
+            change_kind,
+            member,
+        )
+        for package in authority_packages
+        for change_kind in ("added", "removed", "changed")
+        for member in package["archive_diff"][change_kind]
+    )
+    closure_changes = sorted(
+        core_candidate_lock.get("changed_packages", []),
+        key=lambda item: (str(item.get("name")), str(item.get("path"))),
+    )
+    closure_names = {
+        str(item.get("name"))
+        for item in closure_changes
+        if isinstance(item.get("name"), str)
+    }
+    if not authority_complete:
+        errors.append("authority input is incomplete")
+    try:
+        contract = canonical_installation_contract(installation_contract)
+    except RehearsalError as exc:
+        contract = {"components": [], "capabilities": [], "contracts": []}
+        errors.append(str(exc))
+
+    component_ids = {item["id"] for item in contract["components"]}
+    if any(
+        item.startswith(SHADOW_ID_PREFIX)
+        for item in baseline_check_ids | component_ids
+    ):
+        errors.append("baseline or component ID collides with reserved shadow namespace")
+
+    directly_affected: set[str] = set()
+    mapped_members: set[tuple[str, str, str]] = set()
+    for component in contract["components"]:
+        for artifact in component["artifacts"]:
+            if artifact["kind"] == "npm_archive_member":
+                package, separator, member = artifact["ref"].partition(":")
+                if not separator:
+                    errors.append(
+                        f"component {component['id']} has an unparseable "
+                        "npm_archive_member ref"
+                    )
+                    continue
+                for changed_member in changed_members:
+                    if changed_member[0] == package and changed_member[2] == member:
+                        directly_affected.add(component["id"])
+                        mapped_members.add(changed_member)
+            elif artifact["kind"] == "npm_package":
+                package = artifact["ref"].split("@", 1)[0]
+                if artifact["ref"].startswith("@"):
+                    package = artifact["ref"].rsplit("@", 1)[0]
+                if package in closure_names:
+                    directly_affected.add(component["id"])
+
+    affected = set(directly_affected)
+    changed = True
+    while changed:
+        changed = False
+        for component in contract["components"]:
+            if component["id"] in affected:
+                continue
+            if any(
+                dependency["component_id"] in affected
+                for dependency in component["depends_on"]
+            ):
+                affected.add(component["id"])
+                changed = True
+
+    affected_components = sorted(affected)
+    affected_capabilities = sorted(
+        capability["id"]
+        for capability in contract["capabilities"]
+        if set(capability["component_ids"]) & affected
+    )
+    affected_contracts = sorted(
+        {
+            contract_id
+            for component in contract["components"]
+            if component["id"] in affected
+            for contract_id in component["contract_ids"]
+        }
+    )
+    would_add_checks = sorted(
+        (
+            {
+                "id": f"{SHADOW_ID_PREFIX}check:{capability['id']}:{index}",
+                "capability_id": capability["id"],
+                "description": description,
+            }
+            for capability in contract["capabilities"]
+            if capability["id"] in affected_capabilities
+            for index, description in enumerate(
+                capability["post_activation_checks"],
+                start=1,
+            )
+        ),
+        key=lambda item: item["id"],
+    )
+    generated_ids = [item["id"] for item in would_add_checks]
+    if len(generated_ids) != len(set(generated_ids)):
+        errors.append("generated shadow check IDs collide")
+    if set(generated_ids) & (baseline_check_ids | component_ids):
+        errors.append("generated shadow check ID collides with a declared ID")
+
+    unmapped_members = sorted(
+        (
+            {
+                "package": package,
+                "change": change_kind,
+                "member": member,
+            }
+            for package, change_kind, member in changed_members
+            if (package, change_kind, member) not in mapped_members
+        ),
+        key=lambda item: (item["package"], item["change"], item["member"]),
+    )
+    mapped_closure_names = {
+        str(item["ref"]).split("@", 1)[0]
+        for component in contract["components"]
+        for item in component["artifacts"]
+        if item["kind"] == "npm_package" and not item["ref"].startswith("@")
+    } | {
+        str(item["ref"]).rsplit("@", 1)[0]
+        for component in contract["components"]
+        for item in component["artifacts"]
+        if item["kind"] == "npm_package" and item["ref"].startswith("@")
+    }
+    unmapped_packages = sorted(closure_names - mapped_closure_names)
+    would_flag_risks: list[dict[str, Any]] = []
+    if unmapped_members:
+        would_flag_risks.append(
+            {
+                "id": f"{SHADOW_ID_PREFIX}risk:unmapped-members",
+                "kind": "unmapped_members",
+                "count": len(unmapped_members),
+            }
+        )
+    if unmapped_packages:
+        would_flag_risks.append(
+            {
+                "id": f"{SHADOW_ID_PREFIX}risk:unmapped-packages",
+                "kind": "unmapped_packages",
+                "count": len(unmapped_packages),
+            }
+        )
+    if closure_changes:
+        would_flag_risks.append(
+            {
+                "id": f"{SHADOW_ID_PREFIX}risk:resolved-closure-drift",
+                "kind": "resolved_closure_drift",
+                "count": len(closure_changes),
+            }
+        )
+    would_flag_risks.sort(key=lambda item: item["id"])
+    shadow_content = {
+        "schema": "openclaw.safe_update.impact_shadow_content.v1",
+        "authoritative": False,
+        "affected_components": affected_components,
+        "affected_capabilities": affected_capabilities,
+        "affected_contracts": affected_contracts,
+        "would_add_checks": would_add_checks,
+        "would_flag_risks": would_flag_risks,
+        "would_block": bool(errors or unmapped_members or unmapped_packages),
+        "would_omit_checks": [],
+        "unmapped_members": unmapped_members,
+        "unmapped_packages": unmapped_packages,
+        "errors": errors,
+    }
+    return {
+        "schema": IMPACT_SHADOW_SCHEMA,
+        **common,
+        "authoritative": False,
+        "status": "failed" if errors else "success",
+        "shadow_digest": canonical_digest(shadow_content),
+        **{key: value for key, value in shadow_content.items() if key != "schema"},
+    }
 
 
 def semver_tuple(value: str) -> tuple[int, int, int] | None:
@@ -3079,6 +3272,16 @@ def simulate(args: argparse.Namespace) -> int:
         common=common,
         input_errors=conservative_input_errors,
     )
+    impact_shadow = None
+    if not args.disable_impact_shadow:
+        impact_shadow = build_impact_shadow(
+            authority_packages=authority_packages,
+            core_candidate_lock=core_candidate_lock,
+            installation_contract=installation_contract,
+            baseline_check_ids={item["id"] for item in checks},
+            authority_complete=authority_complete,
+            common=common,
+        )
     postcheck_plan = {
         "schema": "openclaw.safe_update.post_upgrade_e2e.v1",
         **common,
@@ -3104,6 +3307,7 @@ def simulate(args: argparse.Namespace) -> int:
     installation_candidate_path = output_dir / "installation-candidate-lock.json"
     installation_attestation_path = output_dir / "installation-attestation.json"
     conservative_gates_path = output_dir / "conservative-gates.json"
+    impact_shadow_path = output_dir / "impact-shadow.json"
     synthetic_path = output_dir / "synthetic-update.json"
     customization_path = output_dir / "customization-compatibility.json"
     coverage_path = output_dir / "coverage-report.json"
@@ -3113,6 +3317,8 @@ def simulate(args: argparse.Namespace) -> int:
     write_json(installation_candidate_path, installation_candidate_lock)
     write_json(installation_attestation_path, installation_attestation)
     write_json(conservative_gates_path, conservative_gates)
+    if impact_shadow is not None:
+        write_json(impact_shadow_path, impact_shadow)
     write_json(synthetic_path, synthetic)
     write_json(customization_path, customizations)
     write_json(coverage_path, coverage_report)
@@ -3290,6 +3496,7 @@ def parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--installation-contract", type=Path)
     simulate_parser.add_argument("--installation-attestation", type=Path)
     simulate_parser.add_argument("--conservative-inputs", type=Path)
+    simulate_parser.add_argument("--disable-impact-shadow", action="store_true")
     simulate_parser.add_argument("--allow-no-coverage", action="store_true")
     simulate_parser.add_argument("--runtime-node-version")
     simulate_parser.add_argument("--runtime-os")

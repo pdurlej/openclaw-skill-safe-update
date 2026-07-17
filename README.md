@@ -185,6 +185,7 @@ protection this project exists to provide.
 | `installation-candidate-lock.json` | One canonical current and target root binding core, declared add-ons, sidecars, configuration/personalization identities, contracts, environment, analyzer, and composition policy |
 | `installation-attestation.json` | Fresh public-safe comparison of observed local components and service config pointers with the composed current root |
 | `conservative-gates.json` | Lossless deterministic classification of unknown, migration, rollback, environment, protocol, and contract risk |
+| `impact-shadow.json` | Non-authoritative mapping from closed-candidate changes to components, capabilities, contracts, hypothetical checks, and unmapped paths |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
 | `coverage-report.json` | Whether every required installation surface is represented and bound to evidence |
@@ -207,6 +208,13 @@ floating or unsupported identities block composition. It does **not** mean
 “update now,” and it does not pretend that post-upgrade checks already ran. A
 real operator still needs a verified backup, a lossless rollback, a
 maintenance window, and explicit approval for the exact mutation.
+
+`impact-shadow.json` is deliberately removable. It may show checks a future
+policy could add, risks it would flag, and paths it cannot map, but
+`would_omit_checks` is always empty. Running with `--disable-impact-shadow`
+must produce the same complete canonical decision, digest, required evidence,
+and verdict. Shadow output is not included in the authoritative evidence
+bundle and cannot block or improve status.
 
 The gate tells you **what is at risk, which evidence failed, and what still must
 be proven**. It deliberately does not prescribe how to rewrite every local
