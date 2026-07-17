@@ -11,6 +11,7 @@ The safe-update rehearsal is a read-only package compatibility check. It does no
 - A customization manifest describing deployment-specific compatibility checks, unless the operator explicitly confirms a vanilla deployment.
 - An installation coverage profile declaring the runtime Node version, required surfaces, their customization evidence, and concrete post-upgrade checks.
 - An installation contract declaring every capability, component, contract, dependency edge, and separately distributed artifact identity.
+- A fresh local installation attestation bound to the current composed candidate root.
 
 ## Outputs
 
@@ -34,6 +35,16 @@ edges, exact artifacts, relevant environment, analyzer version, and
 composition policy. External plugin, sidecar, add-on, configuration, and
 personalization artifacts must use `<name>@<exact-version>#sha256:<digest>`.
 Missing, floating, duplicate, or unsupported artifacts fail closed.
+
+`installation-attestation.json` keeps observation, freshness, and completeness
+as separate axes. It is generated from an explicit local observation spec and
+binds sanitized component names, types, digests, and service config pointers
+to the current composed candidate root. Local paths are never emitted.
+Configuration and personalization paths are checked structurally without
+opening their contents. Content hashing is permitted only for declared
+package, add-on, sidecar, and external-asset files. Missing observations,
+unexplained residue, undeclared service config pointers, an expired artifact,
+or a candidate-root mismatch fail closed.
 
 `synthetic-update.json` records archive safety, package identity, bounded added, removed, and changed member lists, plus current-to-target changes in Node engines, dependencies, optional and peer dependencies, lifecycle scripts, and executable declarations. Changed lifecycle scripts and incompatible or unproven Node requirements block the rehearsal.
 

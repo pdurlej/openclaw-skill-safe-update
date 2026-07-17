@@ -31,6 +31,11 @@ on:
         required: true
         default: .openclaw-safe-update/coverage.json
         type: string
+      installation-attestation-file:
+        description: Fresh public-safe local installation attestation
+        required: true
+        default: .openclaw-safe-update/installation-attestation.json
+        type: string
   workflow_call:
     inputs:
       current-version:
@@ -55,6 +60,10 @@ on:
         required: false
         default: .openclaw-safe-update/coverage.json
         type: string
+      installation-attestation-file:
+        required: false
+        default: .openclaw-safe-update/installation-attestation.json
+        type: string
 
 permissions:
   contents: read
@@ -70,6 +79,7 @@ jobs:
       CUSTOMIZATIONS_FILE: ${{ inputs['customizations-file'] }}
       REQUIRE_CUSTOMIZATIONS: ${{ inputs['require-customizations'] }}
       COVERAGE_FILE: ${{ inputs['coverage-file'] }}
+      INSTALLATION_ATTESTATION_FILE: ${{ inputs['installation-attestation-file'] }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -104,6 +114,9 @@ jobs:
           if [[ -f "$COVERAGE_FILE" ]]; then
             arguments+=(--coverage "$COVERAGE_FILE")
           fi
+          if [[ -f "$INSTALLATION_ATTESTATION_FILE" ]]; then
+            arguments+=(--installation-attestation "$INSTALLATION_ATTESTATION_FILE")
+          fi
           if [[ -f "$CUSTOMIZATIONS_FILE" ]]; then
             arguments+=(--customizations "$CUSTOMIZATIONS_FILE")
           elif [[ "$REQUIRE_CUSTOMIZATIONS" != "true" ]]; then
@@ -121,6 +134,7 @@ jobs:
             artifacts/safe-update/runtime-truth.json
             artifacts/safe-update/core-candidate-lock.json
             artifacts/safe-update/installation-candidate-lock.json
+            artifacts/safe-update/installation-attestation.json
             artifacts/safe-update/synthetic-update.json
             artifacts/safe-update/customization-compatibility.json
             artifacts/safe-update/coverage-report.json

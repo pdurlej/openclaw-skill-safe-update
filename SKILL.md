@@ -128,7 +128,7 @@ python3 scripts/openclaw_safe_update.py contract \
 The contract preserves all declared checks. Components may have several roles;
 application phases are descriptive and never prove isolation.
 
-### 5. Run the Synthetic Rehearsal
+### 5. Compose, Attest, and Rerun
 
 ```bash
 python3 scripts/openclaw_safe_update.py simulate \
@@ -137,9 +137,22 @@ python3 scripts/openclaw_safe_update.py simulate \
   --coverage .openclaw-safe-update/coverage.json \
   --installation-contract artifacts/installation-contract.json \
   --output-dir artifacts/safe-update
+
+python3 scripts/openclaw_safe_update.py attest \
+  --candidate-lock artifacts/safe-update/installation-candidate-lock.json \
+  --observation .openclaw-safe-update/installation-observation.json \
+  --output artifacts/installation-attestation.json
+
+python3 scripts/openclaw_safe_update.py simulate \
+  --input-dir artifacts/input \
+  --customizations .openclaw-safe-update/customizations.json \
+  --coverage .openclaw-safe-update/coverage.json \
+  --installation-contract artifacts/installation-contract.json \
+  --installation-attestation artifacts/installation-attestation.json \
+  --output-dir artifacts/safe-update
 ```
 
-The rehearsal safely inspects archives, verifies exact package identity and integrity, validates the resolved OpenClaw core candidate, composes one exact current and target installation root, compares current and target file trees and package metadata, evaluates customization checks, validates installation coverage, and emits a hash-bound evidence bundle. Missing or non-reproducible closure data, floating external artifacts, environment drift, incompatible or unproven Node requirements, and changed package lifecycle scripts block the rehearsal.
+The first simulation deliberately blocks while still writing the candidate lock. The local attestation step emits only sanitized names, types, and digests; it never emits local paths or opens configuration/personalization contents. The second rehearsal can become ready only with a fresh, complete attestation bound to the current composed root. Missing or non-reproducible closure data, floating external artifacts, unexplained local residue, undeclared service config pointers, stale attestation, environment drift, incompatible or unproven Node requirements, and changed package lifecycle scripts block the rehearsal.
 
 For a genuinely vanilla deployment, `--allow-no-customizations --allow-no-coverage --runtime-node-version <exact-version> --runtime-os <os> --runtime-arch <arch> --runtime-libc <libc>` may be used only after explicitly confirming that there are no local overlays, patches, wrappers, plugin contracts, or runtime-specific integrations. Do not silently add either flag to automation.
 
@@ -150,6 +163,7 @@ Inspect these artifacts:
 - `runtime-truth.json`
 - `core-candidate-lock.json`
 - `installation-candidate-lock.json`
+- `installation-attestation.json`
 - `synthetic-update.json`
 - `customization-compatibility.json`
 - `coverage-report.json`

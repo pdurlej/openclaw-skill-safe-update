@@ -203,6 +203,7 @@
             "runtime_truth",
             "core_candidate_lock",
             "installation_candidate_lock",
+            "installation_attestation",
             "synthetic_update",
             "customization_compatibility",
             "installation_coverage",
@@ -222,6 +223,12 @@
               ]
             },
             "installation_candidate_lock": {
+              "enum": [
+                "success",
+                "failed"
+              ]
+            },
+            "installation_attestation": {
               "enum": [
                 "success",
                 "failed"

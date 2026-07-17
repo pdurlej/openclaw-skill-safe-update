@@ -1,0 +1,32 @@
+{
+  "schema": "openclaw.safe_update.installation_observation.v1",
+  "components": [
+    {
+      "component_id": "configuration.signal-media",
+      "artifact_ref": "signal-media@1.0.0#sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "name": "signal-media",
+      "path": "/replace/with/local/generated-openclaw.json",
+      "mode": "identity_only"
+    },
+    {
+      "component_id": "sidecar.mcp",
+      "artifact_ref": "mcp-broker@2.1.0#sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "name": "mcp-broker",
+      "path": "/replace/with/local/mcp-broker.tgz",
+      "mode": "content_sha256"
+    },
+    {
+      "component_id": "personalization.voice",
+      "artifact_ref": "conversation-voice@3.0.0#sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "name": "conversation-voice",
+      "path": "/replace/with/local/persona-directory",
+      "mode": "identity_only"
+    }
+  ],
+  "services": [
+    {
+      "name": "openclaw-gateway.service",
+      "path": "/replace/with/local/openclaw-gateway.service"
+    }
+  ]
+}

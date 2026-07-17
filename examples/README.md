@@ -23,3 +23,7 @@ permission to update.
 
 Until an approved update has happened, the post-upgrade E2E checks remain
 `not_run`. The kit never rewrites that state to green based on package evidence.
+
+`local-installation.observation.json` is a path-bearing local input template.
+Replace every placeholder on the machine being attested. Its paths are never
+copied to the public-safe attestation output.

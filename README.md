@@ -134,12 +134,35 @@ python3 scripts/openclaw_safe_update.py simulate \
   --coverage assets/coverage.example.json \
   --installation-contract artifacts/installation-contract.json \
   --output-dir artifacts/safe-update
+
+python3 scripts/openclaw_safe_update.py attest \
+  --candidate-lock artifacts/safe-update/installation-candidate-lock.json \
+  --observation .openclaw-safe-update/installation-observation.json \
+  --output artifacts/installation-attestation.json
+
+python3 scripts/openclaw_safe_update.py simulate \
+  --input-dir artifacts/input \
+  --customizations assets/customizations.example.json \
+  --coverage assets/coverage.example.json \
+  --installation-contract artifacts/installation-contract.json \
+  --installation-attestation artifacts/installation-attestation.json \
+  --output-dir artifacts/safe-update
 ```
 
 `inventory` reads only the installed package metadata. It does not inspect
 OpenClaw configuration, credentials, conversations, or service state. Complete
 its `coverage.draft.json` with every channel, plugin, MCP, memory, provider,
 service, persona, attachment, and voice surface you need to preserve.
+
+The first simulation is expected to block while still producing the composed
+candidate lock. `attest` then compares an explicit local observation spec with
+that current root. The second simulation can become
+`ready_for_operator_plan` only while the attestation is fresh and complete.
+Paths from the observation spec are never emitted. Configuration and
+personalization files use `identity_only`, so their contents are never opened;
+content hashing is restricted to declared package, add-on, sidecar, and
+external-asset files. See
+[`examples/local-installation.observation.json`](examples/local-installation.observation.json).
 
 Replace both example manifests with checks for your actual system. A genuinely
 vanilla deployment can use `--allow-no-customizations --allow-no-coverage
@@ -155,6 +178,7 @@ protection this project exists to provide.
 | `core-candidate-lock.json` | Resolved OpenClaw dependency closure, platform/toolchain identity, and current-to-target package drift |
 | `installation-contract.json` | Capability/component graph translated from the v1.1 declarations |
 | `installation-candidate-lock.json` | One canonical current and target root binding core, declared add-ons, sidecars, configuration/personalization identities, contracts, environment, analyzer, and composition policy |
+| `installation-attestation.json` | Fresh public-safe comparison of observed local components and service config pointers with the composed current root |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
 | `coverage-report.json` | Whether every required installation surface is represented and bound to evidence |
@@ -165,8 +189,8 @@ protection this project exists to provide.
 | `operator-plan.md` | Rollback-aware preparation that explicitly stops before apply |
 
 `ready_for_operator_plan` means the exact package archives, resolved OpenClaw
-core closure, composed installation candidate, customization, runtime, and
-declared installation-coverage evidence passed. The closure resolver uses an
+core closure, composed installation candidate, local installation attestation,
+customization, runtime, and declared installation-coverage evidence passed. The closure resolver uses an
 isolated npm configuration, never runs lifecycle scripts, and binds exact
 transitive, peer, optional, and platform-selected packages into the candidate
 root. Separately distributed artifacts must use an exact version and SHA-256;
