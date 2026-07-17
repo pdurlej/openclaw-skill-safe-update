@@ -119,6 +119,8 @@ jobs:
           path: |
             artifacts/input/input-metadata.json
             artifacts/safe-update/runtime-truth.json
+            artifacts/safe-update/core-candidate-lock.json
+            artifacts/safe-update/installation-candidate-lock.json
             artifacts/safe-update/synthetic-update.json
             artifacts/safe-update/customization-compatibility.json
             artifacts/safe-update/coverage-report.json

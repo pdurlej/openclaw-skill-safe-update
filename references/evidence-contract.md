@@ -10,6 +10,7 @@ The safe-update rehearsal is a read-only package compatibility check. It does no
 - Current and target OpenClaw dependency closures resolved with an isolated npm configuration, lifecycle scripts disabled, and exact Node, npm, OS, architecture, and libc identity.
 - A customization manifest describing deployment-specific compatibility checks, unless the operator explicitly confirms a vanilla deployment.
 - An installation coverage profile declaring the runtime Node version, required surfaces, their customization evidence, and concrete post-upgrade checks.
+- An installation contract declaring every capability, component, contract, dependency edge, and separately distributed artifact identity.
 
 ## Outputs
 
@@ -25,6 +26,14 @@ integrity, mutable links, unsupported lockfiles, non-registry resolutions,
 truncated closure data, or current/target environment drift fail closed.
 Lifecycle scripts are declared and hash-bound by package integrity but are
 never executed during resolution.
+
+`installation-candidate-lock.json` composes the core closure with the
+canonical installation contract. Its current and target roots bind every
+declared component once, including all of its roles, contracts, dependency
+edges, exact artifacts, relevant environment, analyzer version, and
+composition policy. External plugin, sidecar, add-on, configuration, and
+personalization artifacts must use `<name>@<exact-version>#sha256:<digest>`.
+Missing, floating, duplicate, or unsupported artifacts fail closed.
 
 `synthetic-update.json` records archive safety, package identity, bounded added, removed, and changed member lists, plus current-to-target changes in Node engines, dependencies, optional and peer dependencies, lifecycle scripts, and executable declarations. Changed lifecycle scripts and incompatible or unproven Node requirements block the rehearsal.
 
@@ -47,6 +56,9 @@ run metadata, evidence paths and hashes, and operator-facing prose do not affect
 that digest. The status is always `phase: preflight`,
 `post_activation_e2e: not_run`, `production_apply_allowed: false`, and
 `operator_approval: false`.
+The authoritative status repeats exactly one current and one target composed
+candidate root; it does not treat a list of loosely related hashes as the
+installation identity.
 
 The embedded, non-authoritative `compatibility_view` preserves the previous
 `openclaw.safe_update.verdict.v1` payload for v1.1 consumers. It is derived from

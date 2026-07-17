@@ -25,8 +25,10 @@ CUSTOMIZATIONS_SCHEMA = "openclaw.safe_update.customizations.v1"
 COVERAGE_SCHEMA = "openclaw.safe_update.coverage.v1"
 CORE_CLOSURE_SCHEMA = "openclaw.safe_update.core_closure.v1"
 CORE_CANDIDATE_LOCK_SCHEMA = "openclaw.safe_update.core_candidate_lock.v1"
+INSTALLATION_CANDIDATE_LOCK_SCHEMA = "openclaw.safe_update.installation_candidate_lock.v1"
 CORE_CLOSURE_ANALYZER_VERSION = "1.0.0"
 CORE_CLOSURE_POLICY_VERSION = "1"
+INSTALLATION_COMPOSITION_POLICY_VERSION = "1"
 INSTALLATION_CONTRACT_SCHEMA = "openclaw.safe_update.installation_contract.v1"
 STATUS_SCHEMA = "openclaw.safe_update.status.v2"
 DECISION_SCHEMA = "openclaw.safe_update.decision.v1"
@@ -45,6 +47,7 @@ STATUS_FIELDS = frozenset(
         "post_activation_e2e",
         "verdict",
         "reason",
+        "candidate_roots",
         "evidence_bundle",
         "next_step",
         "decision_content",
@@ -60,6 +63,7 @@ DECISION_FIELDS = frozenset(
         "verdict",
         "reason_code",
         "evidence_status",
+        "candidate_roots",
         "production_apply_allowed",
         "operator_approval",
         "post_activation_e2e",
@@ -70,6 +74,7 @@ EVIDENCE_STATUS_FIELDS = frozenset(
     {
         "runtime_truth",
         "core_candidate_lock",
+        "installation_candidate_lock",
         "synthetic_update",
         "customization_compatibility",
         "installation_coverage",
@@ -162,6 +167,7 @@ def build_status(
     reason: str,
     reason_code: str,
     evidence_status: dict[str, str],
+    candidate_roots: dict[str, str | None],
     evidence_bundle: dict[str, str],
     next_step: str,
     next_step_code: str,
@@ -172,6 +178,7 @@ def build_status(
         "verdict": verdict,
         "reason_code": reason_code,
         "evidence_status": evidence_status,
+        "candidate_roots": candidate_roots,
         "production_apply_allowed": False,
         "operator_approval": False,
         "post_activation_e2e": "not_run",
@@ -185,6 +192,7 @@ def build_status(
         "post_activation_e2e": "not_run",
         "verdict": verdict,
         "reason": reason,
+        "candidate_roots": candidate_roots,
         "evidence_bundle": evidence_bundle,
         "next_step": next_step,
         "decision_content": decision_content,
@@ -232,6 +240,17 @@ def parse_status(value: Any) -> dict[str, Any]:
         raise RehearsalError("status reason must be a non-empty string")
     if not isinstance(value.get("next_step"), str) or not value["next_step"]:
         raise RehearsalError("status next_step must be a non-empty string")
+    candidate_roots = value.get("candidate_roots")
+    if (
+        not isinstance(candidate_roots, dict)
+        or set(candidate_roots) != {"current", "target"}
+        or any(
+            root is not None
+            and not re.fullmatch(r"sha256:[0-9a-f]{64}", str(root))
+            for root in candidate_roots.values()
+        )
+    ):
+        raise RehearsalError("status candidate_roots is invalid")
     bundle = value.get("evidence_bundle")
     if (
         not isinstance(bundle, dict)
@@ -251,6 +270,7 @@ def parse_status(value: Any) -> dict[str, Any]:
     for field in (
         "phase",
         "verdict",
+        "candidate_roots",
         "production_apply_allowed",
         "operator_approval",
         "post_activation_e2e",
@@ -284,6 +304,10 @@ def parse_status(value: Any) -> dict[str, Any]:
         raise RehearsalError("blocked status must contain failed evidence")
     if value["verdict"] == "ready_for_operator_plan" and evidence_values != {"success"}:
         raise RehearsalError("ready status requires all evidence to succeed")
+    if value["verdict"] == "ready_for_operator_plan" and any(
+        root is None for root in candidate_roots.values()
+    ):
+        raise RehearsalError("ready status requires both candidate roots")
 
     envelope = value.get("run_envelope")
     if not isinstance(envelope, dict):
@@ -1479,6 +1503,11 @@ def parse_installation_contract(value: Any) -> dict[str, Any]:
             for item in dependencies
         ):
             raise RehearsalError(f"component {component_id} has invalid dependencies")
+        dependency_keys = [
+            (item["component_id"], item["kind"]) for item in dependencies
+        ]
+        if len(dependency_keys) != len(set(dependency_keys)):
+            raise RehearsalError(f"component {component_id} has duplicate dependencies")
         if not isinstance(component.get("supports"), list) or any(
             not isinstance(item, str) for item in component["supports"]
         ):
@@ -1569,6 +1598,45 @@ def adapt_v1_installation_contract(
     checks: list[dict[str, Any]],
     coverage_profile: dict[str, Any],
 ) -> dict[str, Any]:
+    if not checks and not coverage_profile["surfaces"]:
+        return parse_installation_contract(
+            {
+                "schema": INSTALLATION_CONTRACT_SCHEMA,
+                "install_shape": coverage_profile["install_shape"],
+                "runtime": coverage_profile["runtime"],
+                "capabilities": [
+                    {
+                        "id": "openclaw.core",
+                        "category": "other",
+                        "business_criticality": "critical",
+                        "evidence_policy": "always",
+                        "component_ids": ["core.openclaw"],
+                        "post_activation_checks": [
+                            "verify OpenClaw starts after the approved update"
+                        ],
+                    }
+                ],
+                "components": [
+                    {
+                        "id": "core.openclaw",
+                        "roles": ["core"],
+                        "application_phases": ["core"],
+                        "artifacts": [{"kind": "npm_package", "ref": "openclaw"}],
+                        "contract_ids": ["openclaw-core-v1"],
+                        "depends_on": [],
+                        "supports": ["openclaw.core"],
+                        "governance": {},
+                    }
+                ],
+                "contracts": [
+                    {
+                        "id": "openclaw-core-v1",
+                        "kind": "package_contract",
+                        "evidence_refs": ["core candidate lock"],
+                    }
+                ],
+            }
+        )
     checks_by_id = {item["id"]: item for item in checks}
     component_supports: dict[str, list[str]] = {item["id"]: [] for item in checks}
     capabilities: list[dict[str, Any]] = []
@@ -1644,6 +1712,230 @@ def contract(args: argparse.Namespace) -> int:
     write_json(args.output.resolve(), document)
     print(args.output.resolve())
     return 0
+
+
+EXTERNAL_ARTIFACT_RE = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._/@+-]*)@"
+    r"(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)"
+    r"#sha256:(?P<digest>[0-9a-f]{64})$"
+)
+
+
+def canonical_installation_contract(value: Any) -> dict[str, Any]:
+    contract = parse_installation_contract(value)
+    capabilities = []
+    for item in contract["capabilities"]:
+        capabilities.append(
+            {
+                **item,
+                "component_ids": sorted(item["component_ids"]),
+                "post_activation_checks": sorted(item["post_activation_checks"]),
+            }
+        )
+    components = []
+    for item in contract["components"]:
+        artifact_keys = [(artifact["kind"], artifact["ref"]) for artifact in item["artifacts"]]
+        if not artifact_keys:
+            raise RehearsalError(f"component {item['id']} has no artifacts")
+        if len(artifact_keys) != len(set(artifact_keys)):
+            raise RehearsalError(f"component {item['id']} has duplicate artifacts")
+        components.append(
+            {
+                **item,
+                "roles": sorted(item["roles"]),
+                "application_phases": sorted(item["application_phases"]),
+                "artifacts": sorted(
+                    item["artifacts"], key=lambda artifact: (artifact["kind"], artifact["ref"])
+                ),
+                "contract_ids": sorted(item["contract_ids"]),
+                "depends_on": sorted(
+                    item["depends_on"],
+                    key=lambda dependency: (
+                        dependency["component_id"],
+                        dependency["kind"],
+                    ),
+                ),
+                "supports": sorted(item["supports"]),
+            }
+        )
+    contracts = [
+        {**item, "evidence_refs": sorted(item["evidence_refs"])}
+        for item in contract["contracts"]
+    ]
+    return {
+        **contract,
+        "capabilities": sorted(capabilities, key=lambda item: item["id"]),
+        "components": sorted(components, key=lambda item: item["id"]),
+        "contracts": sorted(contracts, key=lambda item: item["id"]),
+    }
+
+
+def lock_component_artifact(
+    artifact: dict[str, str],
+    lane: str,
+    metadata: dict[str, Any],
+    closure: dict[str, Any],
+) -> dict[str, Any]:
+    kind = artifact["kind"]
+    reference = artifact["ref"]
+    if kind == "npm_package":
+        candidates = [
+            item
+            for item in closure["packages"]
+            if item["name"] == reference and item["selected_for_platform"]
+        ]
+        if len(candidates) != 1:
+            raise RehearsalError(
+                f"artifact {reference} does not resolve to one selected core package"
+            )
+        item = candidates[0]
+        return {
+            "kind": kind,
+            "ref": reference,
+            "identity": f"{item['name']}@{item['version']}",
+            "integrity": item["integrity"],
+        }
+    if kind == "npm_archive_member":
+        if ":" not in reference:
+            raise RehearsalError(f"archive member artifact is malformed: {reference}")
+        package_name, member = reference.split(":", 1)
+        if (
+            not PACKAGE_RE.fullmatch(package_name)
+            or not member
+            or PurePosixPath(member).is_absolute()
+            or ".." in PurePosixPath(member).parts
+        ):
+            raise RehearsalError(f"archive member artifact is unsafe: {reference}")
+        root_package = closure["root_package"]
+        if package_name != root_package["name"]:
+            raise RehearsalError(
+                f"archive member package is outside the core closure root: {package_name}"
+            )
+        candidates = [
+            item
+            for item in closure["packages"]
+            if item["name"] == package_name
+            and item["version"] == root_package["version"]
+            and item["selected_for_platform"]
+        ]
+        if len(candidates) != 1:
+            raise RehearsalError(
+                f"archive member package does not resolve to one core package: {package_name}"
+            )
+        package = candidates[0]
+        return {
+            "kind": kind,
+            "ref": reference,
+            "identity": f"{package_name}@{package['version']}:{member}",
+            "integrity": package["integrity"],
+        }
+    if kind in {
+        "plugin_package",
+        "sidecar",
+        "addon",
+        "external_asset",
+        "configuration_identity",
+        "personalization_contract",
+    }:
+        match = EXTERNAL_ARTIFACT_RE.fullmatch(reference)
+        if match is None:
+            raise RehearsalError(
+                f"external artifact must pin exact version and sha256: {reference}"
+            )
+        return {
+            "kind": kind,
+            "ref": reference,
+            "identity": f"{match.group('name')}@{match.group('version')}",
+            "integrity": f"sha256:{match.group('digest')}",
+        }
+    raise RehearsalError(f"unsupported installation artifact kind: {kind}")
+
+
+def compose_installation_candidate(
+    lane: str,
+    metadata: dict[str, Any],
+    installation_contract: dict[str, Any],
+) -> dict[str, Any]:
+    candidate = metadata.get("core_candidate")
+    if not isinstance(candidate, dict):
+        raise RehearsalError("core candidate closure is unavailable")
+    closure = validate_core_closure(
+        candidate.get(lane),
+        "openclaw",
+        str(metadata.get(f"{lane}_version", "")),
+    )
+    canonical_contract = canonical_installation_contract(installation_contract)
+    contracts_by_id = {item["id"]: item for item in canonical_contract["contracts"]}
+    components: list[dict[str, Any]] = []
+    for component in canonical_contract["components"]:
+        artifacts = [
+            lock_component_artifact(item, lane, metadata, closure)
+            for item in component["artifacts"]
+        ]
+        artifacts.sort(key=lambda item: (item["kind"], item["identity"], item["ref"]))
+        contract_locks = [
+            {
+                "id": contract_id,
+                "digest": canonical_digest(contracts_by_id[contract_id]),
+            }
+            for contract_id in sorted(component["contract_ids"])
+        ]
+        components.append(
+            {
+                "id": component["id"],
+                "roles": sorted(component["roles"]),
+                "application_phases": sorted(component["application_phases"]),
+                "artifacts": artifacts,
+                "contracts": contract_locks,
+                "depends_on": sorted(
+                    component["depends_on"],
+                    key=lambda item: (item["component_id"], item["kind"]),
+                ),
+                "supports": sorted(component["supports"]),
+                "governance_digest": canonical_digest(component["governance"]),
+            }
+        )
+    components.sort(key=lambda item: item["id"])
+    content = {
+        "schema": "openclaw.safe_update.installation_candidate.v1",
+        "lane": lane,
+        "core_root": closure["root"],
+        "installation_contract_digest": canonical_digest(canonical_contract),
+        "composition_policy_version": INSTALLATION_COMPOSITION_POLICY_VERSION,
+        "analyzer_version": CORE_CLOSURE_ANALYZER_VERSION,
+        "environment": closure["environment"],
+        "components": components,
+    }
+    return {**content, "root": canonical_digest(content)}
+
+
+def build_installation_candidate_lock(
+    metadata: Any,
+    installation_contract: Any,
+    common: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    errors: list[str] = []
+    current: dict[str, Any] = {}
+    target: dict[str, Any] = {}
+    try:
+        if not isinstance(metadata, dict):
+            raise RehearsalError("input metadata is unavailable")
+        parsed_contract = canonical_installation_contract(installation_contract)
+        current = compose_installation_candidate("current", metadata, parsed_contract)
+        target = compose_installation_candidate("target", metadata, parsed_contract)
+    except (KeyError, RehearsalError) as exc:
+        errors.append(str(exc))
+    status = "failed" if errors else "success"
+    return {
+        "schema": INSTALLATION_CANDIDATE_LOCK_SCHEMA,
+        **common,
+        "status": status,
+        "current_root": current.get("root"),
+        "target_root": target.get("root"),
+        "current": current or None,
+        "target": target or None,
+        "errors": errors,
+    }, status
 
 
 def artifact_reference(path: Path, status: str) -> dict[str, Any]:
@@ -1873,6 +2165,40 @@ def simulate(args: argparse.Namespace) -> int:
         "surfaces": coverage_surface_results,
         "errors": coverage_errors,
     }
+    installation_contract_errors: list[str] = []
+    installation_contract: dict[str, Any] = {}
+    try:
+        if args.installation_contract:
+            installation_contract = canonical_installation_contract(
+                read_json(args.installation_contract.resolve())
+            )
+        else:
+            installation_contract = canonical_installation_contract(
+                adapt_v1_installation_contract(checks, coverage_profile)
+            )
+    except RehearsalError as exc:
+        installation_contract_errors.append(str(exc))
+    if installation_contract_errors:
+        installation_candidate_lock = {
+            "schema": INSTALLATION_CANDIDATE_LOCK_SCHEMA,
+            **common,
+            "status": "failed",
+            "current_root": None,
+            "target_root": None,
+            "current": None,
+            "target": None,
+            "errors": installation_contract_errors,
+        }
+        installation_candidate_status = "failed"
+    else:
+        (
+            installation_candidate_lock,
+            installation_candidate_status,
+        ) = build_installation_candidate_lock(
+            metadata,
+            installation_contract,
+            common,
+        )
     postcheck_plan = {
         "schema": "openclaw.safe_update.post_upgrade_e2e.v1",
         **common,
@@ -1895,12 +2221,14 @@ def simulate(args: argparse.Namespace) -> int:
 
     runtime_path = output_dir / "runtime-truth.json"
     core_candidate_path = output_dir / "core-candidate-lock.json"
+    installation_candidate_path = output_dir / "installation-candidate-lock.json"
     synthetic_path = output_dir / "synthetic-update.json"
     customization_path = output_dir / "customization-compatibility.json"
     coverage_path = output_dir / "coverage-report.json"
     postcheck_path = output_dir / "post-upgrade-e2e.json"
     write_json(runtime_path, runtime_truth)
     write_json(core_candidate_path, core_candidate_lock)
+    write_json(installation_candidate_path, installation_candidate_lock)
     write_json(synthetic_path, synthetic)
     write_json(customization_path, customizations)
     write_json(coverage_path, coverage_report)
@@ -1911,6 +2239,7 @@ def simulate(args: argparse.Namespace) -> int:
         for status in (
             runtime_status,
             core_candidate_status,
+            installation_candidate_status,
             synthetic_status,
             customization_status,
             coverage_status,
@@ -1925,6 +2254,10 @@ def simulate(args: argparse.Namespace) -> int:
         "evidence": [
             artifact_reference(runtime_path, runtime_status),
             artifact_reference(core_candidate_path, core_candidate_status),
+            artifact_reference(
+                installation_candidate_path,
+                installation_candidate_status,
+            ),
             artifact_reference(synthetic_path, synthetic_status),
             artifact_reference(customization_path, customization_status),
             artifact_reference(coverage_path, coverage_status),
@@ -1945,10 +2278,15 @@ def simulate(args: argparse.Namespace) -> int:
         evidence_status={
             "runtime_truth": runtime_status,
             "core_candidate_lock": core_candidate_status,
+            "installation_candidate_lock": installation_candidate_status,
             "synthetic_update": synthetic_status,
             "customization_compatibility": customization_status,
             "installation_coverage": coverage_status,
             "post_upgrade_e2e_plan": postcheck_plan["status"],
+        },
+        candidate_roots={
+            "current": installation_candidate_lock["current_root"],
+            "target": installation_candidate_lock["target_root"],
         },
         evidence_bundle={"path": evidence_path.name, "sha256": digest_file(evidence_path)},
         next_step=(
@@ -1970,6 +2308,8 @@ def simulate(args: argparse.Namespace) -> int:
         f"- Current version: `{metadata.get('current_version', 'unknown')}`\n"
         f"- Target version: `{metadata.get('target_version', 'unknown')}`\n"
         f"- Install shape: `{coverage_profile.get('install_shape') or 'unknown'}`\n"
+        f"- Current candidate root: `{installation_candidate_lock['current_root'] or 'unavailable'}`\n"
+        f"- Target candidate root: `{installation_candidate_lock['target_root'] or 'unavailable'}`\n"
         f"- Evidence bundle: `{evidence_path.name}` (`{digest_file(evidence_path)}`)\n"
         f"- Post-upgrade E2E plan: `{postcheck_path.name}`\n\n"
         "## Required operator inputs\n\n"
@@ -1989,6 +2329,7 @@ def simulate(args: argparse.Namespace) -> int:
         f"- Target version: `{metadata.get('target_version', 'unknown')}`\n"
         f"- Runtime evidence: `{runtime_status}`\n"
         f"- Core candidate lock: `{core_candidate_status}`\n"
+        f"- Installation candidate lock: `{installation_candidate_status}`\n"
         f"- Package evidence: `{synthetic_status}`\n"
         f"- Customization evidence: `{customization_status}`\n"
         f"- Installation coverage: `{coverage_status}`\n"
@@ -2033,6 +2374,7 @@ def parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--customizations", type=Path)
     simulate_parser.add_argument("--allow-no-customizations", action="store_true")
     simulate_parser.add_argument("--coverage", type=Path)
+    simulate_parser.add_argument("--installation-contract", type=Path)
     simulate_parser.add_argument("--allow-no-coverage", action="store_true")
     simulate_parser.add_argument("--runtime-node-version")
     simulate_parser.add_argument("--runtime-os")

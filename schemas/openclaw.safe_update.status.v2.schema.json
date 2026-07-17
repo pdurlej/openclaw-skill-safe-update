@@ -16,6 +16,7 @@
     "post_activation_e2e",
     "verdict",
     "reason",
+    "candidate_roots",
     "evidence_bundle",
     "next_step",
     "decision_content",
@@ -64,6 +65,9 @@
     "reason": {
       "type": "string",
       "minLength": 1
+    },
+    "candidate_roots": {
+      "$ref": "#/$defs/candidateRoots"
     },
     "evidence_bundle": {
       "$ref": "#/$defs/evidenceBundle"
@@ -136,6 +140,30 @@
       },
       "additionalProperties": false
     },
+    "candidateRoots": {
+      "type": "object",
+      "required": [
+        "current",
+        "target"
+      ],
+      "properties": {
+        "current": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
     "decisionContent": {
       "type": "object",
       "required": [
@@ -144,6 +172,7 @@
         "verdict",
         "reason_code",
         "evidence_status",
+        "candidate_roots",
         "production_apply_allowed",
         "operator_approval",
         "post_activation_e2e",
@@ -173,6 +202,7 @@
           "required": [
             "runtime_truth",
             "core_candidate_lock",
+            "installation_candidate_lock",
             "synthetic_update",
             "customization_compatibility",
             "installation_coverage",
@@ -186,6 +216,12 @@
               ]
             },
             "core_candidate_lock": {
+              "enum": [
+                "success",
+                "failed"
+              ]
+            },
+            "installation_candidate_lock": {
               "enum": [
                 "success",
                 "failed"
@@ -217,6 +253,9 @@
             }
           },
           "additionalProperties": false
+        },
+        "candidate_roots": {
+          "$ref": "#/$defs/candidateRoots"
         },
         "production_apply_allowed": {
           "const": false

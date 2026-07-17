@@ -26,7 +26,8 @@ Let an agent do the slow comparison overnight. Before you press Enter on an
 update, get an honest map of what was checked, what is risky, and what remains
 unproven. The kit downloads exact npm artifacts, verifies their identity and
 integrity, compares package and metadata surfaces, checks declared local
-contracts, and emits a hash-bound evidence bundle plus a post-upgrade E2E plan.
+contracts, composes one exact current and target installation root, and emits a
+hash-bound evidence bundle plus a post-upgrade E2E plan.
 
 **Dry run only:** this project does not update OpenClaw. It never deploys,
 restarts services, executes package lifecycle scripts, or treats a green report
@@ -131,6 +132,7 @@ python3 scripts/openclaw_safe_update.py simulate \
   --input-dir artifacts/input \
   --customizations assets/customizations.example.json \
   --coverage assets/coverage.example.json \
+  --installation-contract artifacts/installation-contract.json \
   --output-dir artifacts/safe-update
 ```
 
@@ -152,6 +154,7 @@ protection this project exists to provide.
 | `runtime-truth.json` | Exact package coordinates and integrity receipts |
 | `core-candidate-lock.json` | Resolved OpenClaw dependency closure, platform/toolchain identity, and current-to-target package drift |
 | `installation-contract.json` | Capability/component graph translated from the v1.1 declarations |
+| `installation-candidate-lock.json` | One canonical current and target root binding core, declared add-ons, sidecars, configuration/personalization identities, contracts, environment, analyzer, and composition policy |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
 | `coverage-report.json` | Whether every required installation surface is represented and bound to evidence |
@@ -162,10 +165,12 @@ protection this project exists to provide.
 | `operator-plan.md` | Rollback-aware preparation that explicitly stops before apply |
 
 `ready_for_operator_plan` means the exact package archives, resolved OpenClaw
-core closure, customization, runtime, and declared installation-coverage
-evidence passed. The closure resolver uses an isolated npm configuration,
-never runs lifecycle scripts, and binds exact transitive, peer, optional, and
-platform-selected packages into the candidate root. It does **not** mean
+core closure, composed installation candidate, customization, runtime, and
+declared installation-coverage evidence passed. The closure resolver uses an
+isolated npm configuration, never runs lifecycle scripts, and binds exact
+transitive, peer, optional, and platform-selected packages into the candidate
+root. Separately distributed artifacts must use an exact version and SHA-256;
+floating or unsupported identities block composition. It does **not** mean
 “update now,” and it does not pretend that post-upgrade checks already ran. A
 real operator still needs a verified backup, a lossless rollback, a
 maintenance window, and explicit approval for the exact mutation.
