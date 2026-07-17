@@ -1,6 +1,12 @@
 {
   "checks": [
     {
+      "id": "signal-entrypoint",
+      "kind": "required_member",
+      "member": "package/extensions/signal/index.js",
+      "package": "openclaw"
+    },
+    {
       "id": "mcp-runtime-entrypoint",
       "kind": "required_member",
       "member": "package/dist/mcp/openclaw-tools-serve.js",

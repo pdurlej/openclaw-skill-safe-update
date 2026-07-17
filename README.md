@@ -122,6 +122,11 @@ python3 scripts/openclaw_safe_update.py fetch \
   --packages-json '["openclaw"]' \
   --output-dir artifacts/input
 
+python3 scripts/openclaw_safe_update.py contract \
+  --customizations assets/customizations.example.json \
+  --coverage assets/coverage.example.json \
+  --output artifacts/installation-contract.json
+
 python3 scripts/openclaw_safe_update.py simulate \
   --input-dir artifacts/input \
   --customizations assets/customizations.example.json \
@@ -144,6 +149,7 @@ most of the protection this project exists to provide.
 | Artifact | Purpose |
 | --- | --- |
 | `runtime-truth.json` | Exact package coordinates and integrity receipts |
+| `installation-contract.json` | Capability/component graph translated from the v1.1 declarations |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
 | `coverage-report.json` | Whether every required installation surface is represented and bound to evidence |

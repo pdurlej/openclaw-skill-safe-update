@@ -110,6 +110,19 @@ python3 scripts/openclaw_safe_update.py fetch \
 
 `fetch` uses `npm view` and `npm pack`. It records registry integrity metadata and downloads archives without installing or running them.
 
+Before simulation, translate the v1.1 manifests into the capability/component
+graph:
+
+```bash
+python3 scripts/openclaw_safe_update.py contract \
+  --customizations .openclaw-safe-update/customizations.json \
+  --coverage .openclaw-safe-update/coverage.json \
+  --output artifacts/installation-contract.json
+```
+
+The contract preserves all declared checks. Components may have several roles;
+application phases are descriptive and never prove isolation.
+
 ### 5. Run the Synthetic Rehearsal
 
 ```bash

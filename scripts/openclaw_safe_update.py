@@ -23,6 +23,7 @@ EFFECT = "read_only_openclaw_update_rehearsal"
 INPUT_SCHEMA = "openclaw.safe_update.input.v1"
 CUSTOMIZATIONS_SCHEMA = "openclaw.safe_update.customizations.v1"
 COVERAGE_SCHEMA = "openclaw.safe_update.coverage.v1"
+INSTALLATION_CONTRACT_SCHEMA = "openclaw.safe_update.installation_contract.v1"
 STATUS_SCHEMA = "openclaw.safe_update.status.v2"
 DECISION_SCHEMA = "openclaw.safe_update.decision.v1"
 LEGACY_VERDICT_SCHEMA = "openclaw.safe_update.verdict.v1"
@@ -90,6 +91,10 @@ SURFACE_CATEGORIES = {
     "service",
     "voice",
 }
+BUSINESS_CRITICALITIES = {"critical", "important", "best_effort"}
+EVIDENCE_POLICIES = {"always", "impact_triggered", "sampled"}
+COMPONENT_ROLES = {"core", "compatibility", "addon", "personalization", "configuration"}
+DEPENDENCY_KINDS = {"runtime", "configuration", "state", "contract"}
 PACKAGE_METADATA_FIELDS = (
     "engines",
     "dependencies",
@@ -895,6 +900,277 @@ def load_customizations(path: Path | None, allow_none: bool) -> tuple[list[dict[
     return normalized, errors, "configured"
 
 
+def parse_installation_contract(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("schema") != INSTALLATION_CONTRACT_SCHEMA:
+        raise RehearsalError(
+            f"installation contract schema must be {INSTALLATION_CONTRACT_SCHEMA}"
+        )
+    if set(value) != {
+        "schema",
+        "install_shape",
+        "runtime",
+        "capabilities",
+        "components",
+        "contracts",
+    }:
+        raise RehearsalError("installation contract contains unknown or missing fields")
+    if value.get("install_shape") not in SUPPORTED_INSTALL_SHAPES:
+        raise RehearsalError("installation contract install shape is unsupported")
+    if not isinstance(value.get("runtime"), dict):
+        raise RehearsalError("installation contract runtime must be an object")
+
+    capabilities = value.get("capabilities")
+    components = value.get("components")
+    contracts = value.get("contracts")
+    if not isinstance(capabilities, list) or not capabilities:
+        raise RehearsalError("installation contract capabilities must be a non-empty list")
+    if not isinstance(components, list):
+        raise RehearsalError("installation contract components must be a list")
+    if not isinstance(contracts, list):
+        raise RehearsalError("installation contract contracts must be a list")
+
+    capability_ids: set[str] = set()
+    component_ids: set[str] = set()
+    contract_ids: set[str] = set()
+    for contract in contracts:
+        if (
+            not isinstance(contract, dict)
+            or set(contract) != {"id", "kind", "evidence_refs"}
+            or not isinstance(contract.get("id"), str)
+            or not contract["id"]
+            or contract["id"] in contract_ids
+            or not isinstance(contract.get("kind"), str)
+            or not contract["kind"]
+            or not isinstance(contract.get("evidence_refs"), list)
+            or any(not isinstance(item, str) or not item for item in contract["evidence_refs"])
+        ):
+            raise RehearsalError("installation contract has an invalid or duplicate contract")
+        contract_ids.add(contract["id"])
+
+    for component in components:
+        if not isinstance(component, dict) or set(component) != {
+            "id",
+            "roles",
+            "application_phases",
+            "artifacts",
+            "contract_ids",
+            "depends_on",
+            "supports",
+            "governance",
+        }:
+            raise RehearsalError("installation contract component shape is invalid")
+        component_id = component.get("id")
+        if (
+            not isinstance(component_id, str)
+            or not component_id
+            or component_id in component_ids
+        ):
+            raise RehearsalError("installation contract has an invalid or duplicate component")
+        component_ids.add(component_id)
+        roles = component.get("roles")
+        if (
+            not isinstance(roles, list)
+            or not roles
+            or len(roles) != len(set(roles))
+            or any(role not in COMPONENT_ROLES for role in roles)
+        ):
+            raise RehearsalError(f"component {component_id} has invalid roles")
+        phases = component.get("application_phases")
+        if not isinstance(phases, list) or any(
+            not isinstance(item, str) or not item for item in phases
+        ):
+            raise RehearsalError(f"component {component_id} has invalid application phases")
+        artifacts = component.get("artifacts")
+        if not isinstance(artifacts, list) or any(
+            not isinstance(item, dict)
+            or set(item) != {"kind", "ref"}
+            or not isinstance(item.get("kind"), str)
+            or not isinstance(item.get("ref"), str)
+            or not item["kind"]
+            or not item["ref"]
+            for item in artifacts
+        ):
+            raise RehearsalError(f"component {component_id} has invalid artifacts")
+        if not isinstance(component.get("contract_ids"), list) or any(
+            not isinstance(item, str) for item in component["contract_ids"]
+        ):
+            raise RehearsalError(f"component {component_id} has invalid contract references")
+        dependencies = component.get("depends_on")
+        if not isinstance(dependencies, list) or any(
+            not isinstance(item, dict)
+            or set(item) != {"component_id", "kind"}
+            or item.get("kind") not in DEPENDENCY_KINDS
+            or not isinstance(item.get("component_id"), str)
+            for item in dependencies
+        ):
+            raise RehearsalError(f"component {component_id} has invalid dependencies")
+        if not isinstance(component.get("supports"), list) or any(
+            not isinstance(item, str) for item in component["supports"]
+        ):
+            raise RehearsalError(f"component {component_id} has invalid capability references")
+        governance = component.get("governance")
+        if not isinstance(governance, dict) or any(
+            key not in {"owner", "removal", "upstream_reference", "kill_criteria"}
+            for key in governance
+        ):
+            raise RehearsalError(f"component {component_id} has invalid governance")
+
+    for capability in capabilities:
+        if not isinstance(capability, dict) or set(capability) != {
+            "id",
+            "category",
+            "business_criticality",
+            "evidence_policy",
+            "component_ids",
+            "post_activation_checks",
+        }:
+            raise RehearsalError("installation contract capability shape is invalid")
+        capability_id = capability.get("id")
+        if (
+            not isinstance(capability_id, str)
+            or not capability_id
+            or capability_id in capability_ids
+        ):
+            raise RehearsalError("installation contract has an invalid or duplicate capability")
+        capability_ids.add(capability_id)
+        if capability.get("category") not in SURFACE_CATEGORIES:
+            raise RehearsalError(f"capability {capability_id} has an invalid category")
+        if capability.get("business_criticality") not in BUSINESS_CRITICALITIES:
+            raise RehearsalError(f"capability {capability_id} has invalid criticality")
+        if capability.get("evidence_policy") not in EVIDENCE_POLICIES:
+            raise RehearsalError(f"capability {capability_id} has invalid evidence policy")
+        checks = capability.get("post_activation_checks")
+        if not isinstance(checks, list) or not checks or any(
+            not isinstance(item, str) or not item for item in checks
+        ):
+            raise RehearsalError(f"capability {capability_id} needs post-activation checks")
+        if not isinstance(capability.get("component_ids"), list) or any(
+            not isinstance(item, str) for item in capability["component_ids"]
+        ):
+            raise RehearsalError(f"capability {capability_id} has invalid component references")
+
+    for component in components:
+        component_id = component["id"]
+        for contract_id in component["contract_ids"]:
+            if contract_id not in contract_ids:
+                raise RehearsalError(
+                    f"component {component_id} references unknown contract {contract_id}"
+                )
+        for dependency in component["depends_on"]:
+            if dependency["component_id"] not in component_ids:
+                raise RehearsalError(
+                    f"component {component_id} references unknown dependency "
+                    f"{dependency['component_id']}"
+                )
+        for capability_id in component["supports"]:
+            if capability_id not in capability_ids:
+                raise RehearsalError(
+                    f"component {component_id} references unknown capability {capability_id}"
+                )
+    for capability in capabilities:
+        for component_id in capability["component_ids"]:
+            if component_id not in component_ids:
+                raise RehearsalError(
+                    f"capability {capability['id']} references unknown component {component_id}"
+                )
+            component = next(item for item in components if item["id"] == component_id)
+            if capability["id"] not in component["supports"]:
+                raise RehearsalError(
+                    f"capability {capability['id']} and component {component_id} disagree"
+                )
+    for component in components:
+        for capability_id in component["supports"]:
+            capability = next(
+                item for item in capabilities if item["id"] == capability_id
+            )
+            if component["id"] not in capability["component_ids"]:
+                raise RehearsalError(
+                    f"component {component['id']} and capability {capability_id} disagree"
+                )
+    return value
+
+
+def adapt_v1_installation_contract(
+    checks: list[dict[str, Any]],
+    coverage_profile: dict[str, Any],
+) -> dict[str, Any]:
+    checks_by_id = {item["id"]: item for item in checks}
+    component_supports: dict[str, list[str]] = {item["id"]: [] for item in checks}
+    capabilities: list[dict[str, Any]] = []
+    for surface in coverage_profile["surfaces"]:
+        component_ids = [
+            f"compatibility:{check_id}" for check_id in surface["customization_checks"]
+        ]
+        for check_id in surface["customization_checks"]:
+            if check_id not in checks_by_id:
+                raise RehearsalError(
+                    f"coverage surface {surface['id']} references unknown check {check_id}"
+                )
+            component_supports[check_id].append(surface["id"])
+        capabilities.append(
+            {
+                "id": surface["id"],
+                "category": surface["category"],
+                "business_criticality": "critical" if surface["required"] else "best_effort",
+                "evidence_policy": "always" if surface["required"] else "impact_triggered",
+                "component_ids": component_ids,
+                "post_activation_checks": surface["post_update_checks"],
+            }
+        )
+    contracts = [
+        {
+            "id": f"customization:{check['id']}",
+            "kind": check["kind"],
+            "evidence_refs": [check["id"]],
+        }
+        for check in checks
+    ]
+    components = [
+        {
+            "id": f"compatibility:{check['id']}",
+            "roles": ["compatibility"],
+            "application_phases": ["customization"],
+            "artifacts": [
+                {
+                    "kind": "npm_archive_member",
+                    "ref": f"{check['package']}:{check['member']}",
+                }
+            ],
+            "contract_ids": [f"customization:{check['id']}"],
+            "depends_on": [],
+            "supports": component_supports[check["id"]],
+            "governance": {},
+        }
+        for check in checks
+    ]
+    return parse_installation_contract(
+        {
+            "schema": INSTALLATION_CONTRACT_SCHEMA,
+            "install_shape": coverage_profile["install_shape"],
+            "runtime": coverage_profile["runtime"],
+            "capabilities": capabilities,
+            "components": components,
+            "contracts": contracts,
+        }
+    )
+
+
+def contract(args: argparse.Namespace) -> int:
+    checks, customization_errors, _ = load_customizations(
+        args.customizations.resolve(), False
+    )
+    coverage_profile, coverage_errors, _ = load_coverage(
+        args.coverage.resolve(), False
+    )
+    errors = customization_errors + coverage_errors
+    if errors:
+        raise RehearsalError("; ".join(errors))
+    document = adapt_v1_installation_contract(checks, coverage_profile)
+    write_json(args.output.resolve(), document)
+    print(args.output.resolve())
+    return 0
+
+
 def artifact_reference(path: Path, status: str) -> dict[str, Any]:
     return {"path": path.name, "sha256": digest_file(path), "status": status}
 
@@ -1253,6 +1529,14 @@ def parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--runtime-node-version")
     simulate_parser.add_argument("--output-dir", type=Path, required=True)
     simulate_parser.set_defaults(handler=simulate)
+
+    contract_parser = subcommands.add_parser(
+        "contract", help="translate v1.1 manifests into an installation contract"
+    )
+    contract_parser.add_argument("--customizations", type=Path, required=True)
+    contract_parser.add_argument("--coverage", type=Path, required=True)
+    contract_parser.add_argument("--output", type=Path, required=True)
+    contract_parser.set_defaults(handler=contract)
     return root
 
 
