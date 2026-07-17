@@ -26,6 +26,7 @@ HERO = ROOT / "assets" / "brand" / "openclaw-safe-upgrade-hero.png"
 CLAWHUB_IGNORE = ROOT / ".clawhubignore"
 STATUS_SCHEMA = ROOT / "schemas" / "openclaw.safe_update.status.v2.schema.json"
 BASELINE = ROOT / "references" / "v1.1-baseline.json"
+SIGNAL_VOICE_CONTRACT = ROOT / "examples" / "signal-voice.installation-contract.json"
 BASELINE_SHA = "58f98a3c6a6448fb7e54124c030a18a47e1f7d1c"
 BASELINE_TEST_CASES = [
     "test_archive_filename_traversal_blocks",
@@ -809,6 +810,81 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertEqual(coverage["schema"], "openclaw.safe_update.coverage.v1")
         self.assertEqual(coverage["surfaces"], [])
         self.assertFalse(inventory["production_apply_allowed"])
+
+    def test_v1_1_manifests_translate_to_installation_contract(self) -> None:
+        output = self.root / "installation-contract.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "contract",
+                "--customizations",
+                str(self.customizations),
+                "--coverage",
+                str(self.coverage),
+                "--output",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        contract = SAFE_UPDATE.parse_installation_contract(
+            json.loads(output.read_text())
+        )
+        signal = next(item for item in contract["capabilities"] if item["id"] == "signal")
+        self.assertEqual(signal["business_criticality"], "critical")
+        self.assertEqual(signal["evidence_policy"], "always")
+        self.assertEqual(signal["post_activation_checks"], [
+            "inbound text reaches the agent",
+            "outbound reply reaches Signal",
+            "voice note is transcribed",
+        ])
+        self.assertEqual(signal["component_ids"], ["compatibility:signal-entrypoint"])
+
+    def test_installation_contract_rejects_duplicates_dangling_edges_and_bad_policy(self) -> None:
+        contract = json.loads(SIGNAL_VOICE_CONTRACT.read_text())
+
+        duplicate = copy.deepcopy(contract)
+        duplicate["components"].append(copy.deepcopy(duplicate["components"][0]))
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "duplicate component"):
+            SAFE_UPDATE.parse_installation_contract(duplicate)
+
+        dangling = copy.deepcopy(contract)
+        dangling["components"][1]["depends_on"][0]["component_id"] = "missing"
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "unknown dependency"):
+            SAFE_UPDATE.parse_installation_contract(dangling)
+
+        bad_policy = copy.deepcopy(contract)
+        bad_policy["capabilities"][0]["evidence_policy"] = "unaffected"
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "evidence policy"):
+            SAFE_UPDATE.parse_installation_contract(bad_policy)
+
+    def test_signal_voice_contract_spans_core_addon_configuration_and_postcheck(self) -> None:
+        contract = SAFE_UPDATE.parse_installation_contract(
+            json.loads(SIGNAL_VOICE_CONTRACT.read_text())
+        )
+        capability = contract["capabilities"][0]
+        roles = {
+            role
+            for component in contract["components"]
+            for role in component["roles"]
+        }
+        self.assertEqual(capability["id"], "signal.voice")
+        self.assertEqual(
+            set(capability["component_ids"]),
+            {
+                "core.message-normalizer",
+                "addon.signal-adapter",
+                "configuration.signal-media",
+            },
+        )
+        self.assertTrue({"core", "addon", "configuration", "personalization"} <= roles)
+        self.assertEqual(
+            capability["post_activation_checks"],
+            ["receive and transcribe a Signal voice message"],
+        )
 
     def test_integrity_mismatch_blocks(self) -> None:
         with self.target_archive.open("ab") as handle:

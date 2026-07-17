@@ -1,0 +1,86 @@
+{
+  "schema": "openclaw.safe_update.installation_contract.v1",
+  "install_shape": "npm_global_linux",
+  "runtime": {
+    "node_version": "22.14.0"
+  },
+  "capabilities": [
+    {
+      "id": "signal.voice",
+      "category": "voice",
+      "business_criticality": "critical",
+      "evidence_policy": "always",
+      "component_ids": [
+        "core.message-normalizer",
+        "addon.signal-adapter",
+        "configuration.signal-media"
+      ],
+      "post_activation_checks": [
+        "receive and transcribe a Signal voice message"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "id": "core.message-normalizer",
+      "roles": ["core", "compatibility"],
+      "application_phases": ["core"],
+      "artifacts": [
+        {"kind": "npm_package", "ref": "openclaw"}
+      ],
+      "contract_ids": ["message-normalization-v1"],
+      "depends_on": [],
+      "supports": ["signal.voice"],
+      "governance": {
+        "upstream_reference": "OpenClaw message normalization"
+      }
+    },
+    {
+      "id": "addon.signal-adapter",
+      "roles": ["addon", "compatibility"],
+      "application_phases": ["addons"],
+      "artifacts": [
+        {"kind": "npm_archive_member", "ref": "openclaw:package/extensions/signal/index.js"}
+      ],
+      "contract_ids": ["signal-media-adapter-v1"],
+      "depends_on": [
+        {"component_id": "core.message-normalizer", "kind": "runtime"}
+      ],
+      "supports": ["signal.voice"],
+      "governance": {}
+    },
+    {
+      "id": "configuration.signal-media",
+      "roles": ["configuration", "personalization"],
+      "application_phases": ["personalization"],
+      "artifacts": [
+        {"kind": "configuration_identity", "ref": "signal-media"}
+      ],
+      "contract_ids": ["signal-media-config-v1"],
+      "depends_on": [
+        {"component_id": "addon.signal-adapter", "kind": "configuration"}
+      ],
+      "supports": ["signal.voice"],
+      "governance": {
+        "owner": "installation operator"
+      }
+    }
+  ],
+  "contracts": [
+    {
+      "id": "message-normalization-v1",
+      "kind": "runtime_api",
+      "evidence_refs": ["core package evidence"]
+    },
+    {
+      "id": "signal-media-adapter-v1",
+      "kind": "plugin_contract",
+      "evidence_refs": ["Signal adapter archive evidence"]
+    },
+    {
+      "id": "signal-media-config-v1",
+      "kind": "configuration_contract",
+      "evidence_refs": ["public-safe configuration identity"]
+    }
+  ]
+}
