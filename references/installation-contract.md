@@ -33,3 +33,18 @@ capability/component references fail closed.
 See `examples/signal-voice.installation-contract.json` for a capability that
 spans core normalization, an add-on, configuration/personalization, and a live
 post-activation check.
+
+The composition step treats `npm_package` and `npm_archive_member` artifacts as
+members of the exact core closure. Separately distributed `plugin_package`,
+`sidecar`, `addon`, `external_asset`, `configuration_identity`, and
+`personalization_contract` artifacts must use:
+
+```text
+<name>@<exact-semver>#sha256:<64 lowercase hex characters>
+```
+
+Declaration order has no effect on the composed root. Artifact bytes,
+contract content, environment, analyzer version, and composition policy do.
+See `examples/composed-installation.installation-contract.json` for a fixture
+that combines core, Signal voice support, an MCP sidecar, configuration, and
+personalization.

@@ -1,0 +1,234 @@
+{
+  "schema": "openclaw.safe_update.installation_contract.v1",
+  "install_shape": "npm_global_linux",
+  "runtime": {
+    "node_version": "22.14.0",
+    "os": "linux",
+    "arch": "x64",
+    "libc": "glibc"
+  },
+  "capabilities": [
+    {
+      "id": "mcp.tools",
+      "category": "mcp",
+      "business_criticality": "important",
+      "evidence_policy": "always",
+      "component_ids": [
+        "sidecar.mcp"
+      ],
+      "post_activation_checks": [
+        "execute one allowlisted MCP read"
+      ]
+    },
+    {
+      "id": "persona.voice",
+      "category": "persona",
+      "business_criticality": "important",
+      "evidence_policy": "always",
+      "component_ids": [
+        "personalization.voice"
+      ],
+      "post_activation_checks": [
+        "casual conversation preserves the intended voice"
+      ]
+    },
+    {
+      "id": "signal.voice",
+      "category": "voice",
+      "business_criticality": "critical",
+      "evidence_policy": "always",
+      "component_ids": [
+        "core.message-normalizer",
+        "addon.signal-adapter",
+        "configuration.signal-media"
+      ],
+      "post_activation_checks": [
+        "receive and transcribe a Signal voice message"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "id": "core.message-normalizer",
+      "roles": [
+        "core",
+        "compatibility"
+      ],
+      "application_phases": [
+        "core"
+      ],
+      "artifacts": [
+        {
+          "kind": "npm_package",
+          "ref": "openclaw"
+        }
+      ],
+      "contract_ids": [
+        "message-normalization-v1"
+      ],
+      "depends_on": [],
+      "supports": [
+        "signal.voice"
+      ],
+      "governance": {
+        "upstream_reference": "OpenClaw message normalization"
+      }
+    },
+    {
+      "id": "addon.signal-adapter",
+      "roles": [
+        "addon",
+        "compatibility"
+      ],
+      "application_phases": [
+        "addons"
+      ],
+      "artifacts": [
+        {
+          "kind": "npm_archive_member",
+          "ref": "openclaw:package/extensions/signal/index.js"
+        }
+      ],
+      "contract_ids": [
+        "signal-media-adapter-v1"
+      ],
+      "depends_on": [
+        {
+          "component_id": "core.message-normalizer",
+          "kind": "runtime"
+        }
+      ],
+      "supports": [
+        "signal.voice"
+      ],
+      "governance": {}
+    },
+    {
+      "id": "configuration.signal-media",
+      "roles": [
+        "configuration"
+      ],
+      "application_phases": [
+        "personalization"
+      ],
+      "artifacts": [
+        {
+          "kind": "configuration_identity",
+          "ref": "signal-media@1.0.0#sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "contract_ids": [
+        "signal-media-config-v1"
+      ],
+      "depends_on": [
+        {
+          "component_id": "addon.signal-adapter",
+          "kind": "configuration"
+        }
+      ],
+      "supports": [
+        "signal.voice"
+      ],
+      "governance": {
+        "owner": "installation operator"
+      }
+    },
+    {
+      "id": "sidecar.mcp",
+      "roles": [
+        "addon"
+      ],
+      "application_phases": [
+        "addons"
+      ],
+      "artifacts": [
+        {
+          "kind": "sidecar",
+          "ref": "mcp-broker@2.1.0#sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "contract_ids": [
+        "mcp-read-v1"
+      ],
+      "depends_on": [
+        {
+          "component_id": "core.message-normalizer",
+          "kind": "runtime"
+        }
+      ],
+      "supports": [
+        "mcp.tools"
+      ],
+      "governance": {
+        "owner": "installation operator"
+      }
+    },
+    {
+      "id": "personalization.voice",
+      "roles": [
+        "personalization"
+      ],
+      "application_phases": [
+        "personalization"
+      ],
+      "artifacts": [
+        {
+          "kind": "personalization_contract",
+          "ref": "conversation-voice@3.0.0#sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "contract_ids": [
+        "persona-voice-v1"
+      ],
+      "depends_on": [
+        {
+          "component_id": "core.message-normalizer",
+          "kind": "contract"
+        }
+      ],
+      "supports": [
+        "persona.voice"
+      ],
+      "governance": {
+        "owner": "installation operator"
+      }
+    }
+  ],
+  "contracts": [
+    {
+      "id": "mcp-read-v1",
+      "kind": "mcp_contract",
+      "evidence_refs": [
+        "MCP sidecar integrity"
+      ]
+    },
+    {
+      "id": "message-normalization-v1",
+      "kind": "runtime_api",
+      "evidence_refs": [
+        "core package evidence"
+      ]
+    },
+    {
+      "id": "persona-voice-v1",
+      "kind": "personalization_contract",
+      "evidence_refs": [
+        "public-safe persona digest"
+      ]
+    },
+    {
+      "id": "signal-media-adapter-v1",
+      "kind": "plugin_contract",
+      "evidence_refs": [
+        "Signal adapter archive evidence"
+      ]
+    },
+    {
+      "id": "signal-media-config-v1",
+      "kind": "configuration_contract",
+      "evidence_refs": [
+        "public-safe configuration identity"
+      ]
+    }
+  ]
+}

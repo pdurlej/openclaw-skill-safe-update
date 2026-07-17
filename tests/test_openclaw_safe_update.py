@@ -25,8 +25,14 @@ UPGRADE_ISSUE_TEMPLATE = ROOT / ".github" / "ISSUE_TEMPLATE" / "upgrade-experien
 HERO = ROOT / "assets" / "brand" / "openclaw-safe-upgrade-hero.png"
 CLAWHUB_IGNORE = ROOT / ".clawhubignore"
 STATUS_SCHEMA = ROOT / "schemas" / "openclaw.safe_update.status.v2.schema.json"
+INSTALLATION_CANDIDATE_SCHEMA = (
+    ROOT / "schemas" / "openclaw.safe_update.installation_candidate_lock.v1.schema.json"
+)
 BASELINE = ROOT / "references" / "v1.1-baseline.json"
 SIGNAL_VOICE_CONTRACT = ROOT / "examples" / "signal-voice.installation-contract.json"
+COMPOSED_INSTALLATION_CONTRACT = (
+    ROOT / "examples" / "composed-installation.installation-contract.json"
+)
 BASELINE_SHA = "58f98a3c6a6448fb7e54124c030a18a47e1f7d1c"
 BASELINE_TEST_CASES = [
     "test_archive_filename_traversal_blocks",
@@ -549,6 +555,7 @@ class SafeUpdateTest(unittest.TestCase):
         evidence_status = {
             "runtime_truth": "success",
             "core_candidate_lock": "success",
+            "installation_candidate_lock": "success",
             "synthetic_update": "success",
             "customization_compatibility": "success",
             "installation_coverage": "success",
@@ -560,6 +567,7 @@ class SafeUpdateTest(unittest.TestCase):
             reason="first advisory wording",
             reason_code="baseline_rehearsal_passed",
             evidence_status=evidence_status,
+            candidate_roots={"current": "sha256:" + "3" * 64, "target": "sha256:" + "4" * 64},
             evidence_bundle={"path": "evidence-bundle.json", "sha256": "1" * 64},
             next_step="first operator wording",
             next_step_code="prepare_operator_plan",
@@ -570,6 +578,7 @@ class SafeUpdateTest(unittest.TestCase):
             reason="different advisory wording",
             reason_code="baseline_rehearsal_passed",
             evidence_status=evidence_status,
+            candidate_roots={"current": "sha256:" + "3" * 64, "target": "sha256:" + "4" * 64},
             evidence_bundle={"path": "evidence-bundle.json", "sha256": "2" * 64},
             next_step="different operator wording",
             next_step_code="prepare_operator_plan",
@@ -885,6 +894,176 @@ class SafeUpdateTest(unittest.TestCase):
             capability["post_activation_checks"],
             ["receive and transcribe a Signal voice message"],
         )
+
+    def test_composed_candidate_root_is_independent_of_declaration_order(self) -> None:
+        metadata = json.loads((self.input / "input-metadata.json").read_text())
+        contract = json.loads(COMPOSED_INSTALLATION_CONTRACT.read_text())
+        reordered = copy.deepcopy(contract)
+        reordered["capabilities"].reverse()
+        reordered["components"].reverse()
+        reordered["contracts"].reverse()
+        for component in reordered["components"]:
+            component["roles"].reverse()
+            component["application_phases"].reverse()
+            component["artifacts"].reverse()
+            component["contract_ids"].reverse()
+            component["depends_on"].reverse()
+            component["supports"].reverse()
+
+        first = SAFE_UPDATE.compose_installation_candidate("target", metadata, contract)
+        second = SAFE_UPDATE.compose_installation_candidate(
+            "target", metadata, reordered
+        )
+
+        self.assertEqual(first["root"], second["root"])
+        self.assertEqual(first, second)
+        self.assertEqual(
+            [item["id"] for item in first["components"]],
+            sorted(item["id"] for item in first["components"]),
+        )
+
+    def test_composed_candidate_changes_with_artifact_contract_and_policy(self) -> None:
+        metadata = json.loads((self.input / "input-metadata.json").read_text())
+        contract = json.loads(COMPOSED_INSTALLATION_CONTRACT.read_text())
+        baseline = SAFE_UPDATE.compose_installation_candidate(
+            "target", metadata, contract
+        )
+
+        artifact_drift = copy.deepcopy(contract)
+        sidecar = next(
+            item for item in artifact_drift["components"] if item["id"] == "sidecar.mcp"
+        )
+        sidecar["artifacts"][0]["ref"] = (
+            "mcp-broker@2.1.0#sha256:"
+            + "f" * 64
+        )
+        contract_drift = copy.deepcopy(contract)
+        contract_drift["contracts"][0]["evidence_refs"].append(
+            "second deterministic contract reference"
+        )
+
+        artifact_candidate = SAFE_UPDATE.compose_installation_candidate(
+            "target", metadata, artifact_drift
+        )
+        contract_candidate = SAFE_UPDATE.compose_installation_candidate(
+            "target", metadata, contract_drift
+        )
+        with patch.object(
+            SAFE_UPDATE,
+            "INSTALLATION_COMPOSITION_POLICY_VERSION",
+            "2",
+        ):
+            policy_candidate = SAFE_UPDATE.compose_installation_candidate(
+                "target", metadata, contract
+            )
+
+        self.assertNotEqual(baseline["root"], artifact_candidate["root"])
+        self.assertNotEqual(baseline["root"], contract_candidate["root"])
+        self.assertNotEqual(baseline["root"], policy_candidate["root"])
+
+    def test_composed_candidate_fails_closed_on_unbound_artifacts(self) -> None:
+        metadata = json.loads((self.input / "input-metadata.json").read_text())
+        contract = json.loads(COMPOSED_INSTALLATION_CONTRACT.read_text())
+        cases: list[tuple[str, dict[str, object], str]] = []
+
+        missing = copy.deepcopy(contract)
+        missing["components"][0]["artifacts"] = []
+        cases.append(("missing", missing, "has no artifacts"))
+
+        floating = copy.deepcopy(contract)
+        next(
+            item for item in floating["components"] if item["id"] == "sidecar.mcp"
+        )["artifacts"][0]["ref"] = "mcp-broker@2.1.0"
+        cases.append(("floating", floating, "must pin exact version and sha256"))
+
+        duplicate = copy.deepcopy(contract)
+        component = next(
+            item for item in duplicate["components"] if item["id"] == "sidecar.mcp"
+        )
+        component["artifacts"].append(copy.deepcopy(component["artifacts"][0]))
+        cases.append(("duplicate", duplicate, "duplicate artifacts"))
+
+        duplicate_dependency = copy.deepcopy(contract)
+        component = next(
+            item
+            for item in duplicate_dependency["components"]
+            if item["id"] == "addon.signal-adapter"
+        )
+        component["depends_on"].append(copy.deepcopy(component["depends_on"][0]))
+        cases.append(
+            (
+                "duplicate_dependency",
+                duplicate_dependency,
+                "duplicate dependencies",
+            )
+        )
+
+        unsupported = copy.deepcopy(contract)
+        next(
+            item for item in unsupported["components"] if item["id"] == "sidecar.mcp"
+        )["artifacts"][0]["kind"] = "container_guess"
+        cases.append(("unsupported", unsupported, "unsupported installation artifact kind"))
+
+        common = {
+            "generated_at": "2026-07-18T10:00:00+00:00",
+            **SAFE_UPDATE.safety_fields(),
+        }
+        for name, malformed, expected in cases:
+            with self.subTest(name=name):
+                report, status = SAFE_UPDATE.build_installation_candidate_lock(
+                    metadata,
+                    malformed,
+                    common,
+                )
+                self.assertEqual(status, "failed")
+                self.assertIsNone(report["current_root"])
+                self.assertIsNone(report["target_root"])
+                self.assertTrue(any(expected in error for error in report["errors"]))
+
+    def test_simulation_binds_one_composed_root_into_status_and_evidence(self) -> None:
+        result = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            "--installation-contract",
+            str(COMPOSED_INSTALLATION_CONTRACT),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = self.root / "output"
+        candidate = json.loads(
+            (output / "installation-candidate-lock.json").read_text()
+        )
+        status = json.loads((output / "verdict.json").read_text())
+        evidence = json.loads((output / "evidence-bundle.json").read_text())
+        schema = json.loads(INSTALLATION_CANDIDATE_SCHEMA.read_text())
+
+        self.assertEqual(candidate["status"], "success")
+        self.assertEqual(
+            status["candidate_roots"],
+            {
+                "current": candidate["current_root"],
+                "target": candidate["target_root"],
+            },
+        )
+        self.assertEqual(
+            status["decision_content"]["candidate_roots"],
+            status["candidate_roots"],
+        )
+        self.assertEqual(
+            status["decision_content"]["evidence_status"][
+                "installation_candidate_lock"
+            ],
+            "success",
+        )
+        self.assertIn(
+            "installation-candidate-lock.json",
+            {item["path"] for item in evidence["evidence"]},
+        )
+        self.assertEqual(
+            schema["properties"]["schema"]["const"],
+            SAFE_UPDATE.INSTALLATION_CANDIDATE_LOCK_SCHEMA,
+        )
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(SAFE_UPDATE.parse_status(status), status)
 
     def test_integrity_mismatch_blocks(self) -> None:
         with self.target_archive.open("ab") as handle:

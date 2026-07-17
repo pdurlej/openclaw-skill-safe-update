@@ -135,10 +135,11 @@ python3 scripts/openclaw_safe_update.py simulate \
   --input-dir artifacts/input \
   --customizations .openclaw-safe-update/customizations.json \
   --coverage .openclaw-safe-update/coverage.json \
+  --installation-contract artifacts/installation-contract.json \
   --output-dir artifacts/safe-update
 ```
 
-The rehearsal safely inspects archives, verifies exact package identity and integrity, validates the resolved OpenClaw core candidate, compares current and target file trees and package metadata, evaluates customization checks, validates installation coverage, and emits a hash-bound evidence bundle. Missing or non-reproducible closure data, environment drift, incompatible or unproven Node requirements, and changed package lifecycle scripts block the rehearsal.
+The rehearsal safely inspects archives, verifies exact package identity and integrity, validates the resolved OpenClaw core candidate, composes one exact current and target installation root, compares current and target file trees and package metadata, evaluates customization checks, validates installation coverage, and emits a hash-bound evidence bundle. Missing or non-reproducible closure data, floating external artifacts, environment drift, incompatible or unproven Node requirements, and changed package lifecycle scripts block the rehearsal.
 
 For a genuinely vanilla deployment, `--allow-no-customizations --allow-no-coverage --runtime-node-version <exact-version> --runtime-os <os> --runtime-arch <arch> --runtime-libc <libc>` may be used only after explicitly confirming that there are no local overlays, patches, wrappers, plugin contracts, or runtime-specific integrations. Do not silently add either flag to automation.
 
@@ -148,6 +149,7 @@ Inspect these artifacts:
 
 - `runtime-truth.json`
 - `core-candidate-lock.json`
+- `installation-candidate-lock.json`
 - `synthetic-update.json`
 - `customization-compatibility.json`
 - `coverage-report.json`

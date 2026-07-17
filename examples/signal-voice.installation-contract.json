@@ -54,7 +54,10 @@
       "roles": ["configuration", "personalization"],
       "application_phases": ["personalization"],
       "artifacts": [
-        {"kind": "configuration_identity", "ref": "signal-media"}
+        {
+          "kind": "configuration_identity",
+          "ref": "signal-media@1.0.0#sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
       ],
       "contract_ids": ["signal-media-config-v1"],
       "depends_on": [
