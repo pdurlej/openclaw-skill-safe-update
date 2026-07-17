@@ -55,6 +55,14 @@ and channel-crypto changes require named hash-bound evidence. Resolved closure
 drift is always conservative. Human-facing member lists may be truncated, but
 they never authorize this decision.
 
+`impact-shadow.json` is a non-authoritative attachment. It maps the complete
+closed-candidate diff to declared components, capabilities, contracts, and
+hypothetical namespaced checks while preserving every unmapped member and
+package. Its `would_omit_checks` list is structurally empty. Deleting the
+artifact or running with `--disable-impact-shadow` leaves the canonical
+decision content, digest, required evidence, and verdict unchanged. It is not
+part of `evidence-bundle.json`.
+
 `synthetic-update.json` records archive safety, package identity, bounded added, removed, and changed member lists, plus current-to-target changes in Node engines, dependencies, optional and peer dependencies, lifecycle scripts, and executable declarations. Changed lifecycle scripts and incompatible or unproven Node requirements block the rehearsal.
 
 `customization-compatibility.json` records every requested customization check and its result. Missing members, unreadable text, or absent anchors fail closed.

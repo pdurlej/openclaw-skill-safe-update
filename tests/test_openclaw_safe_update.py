@@ -37,6 +37,9 @@ CONSERVATIVE_GATES_SCHEMA = (
 CONSERVATIVE_INPUTS_SCHEMA = (
     ROOT / "schemas" / "openclaw.safe_update.conservative_inputs.v1.schema.json"
 )
+IMPACT_SHADOW_SCHEMA = (
+    ROOT / "schemas" / "openclaw.safe_update.impact_shadow.v1.schema.json"
+)
 BASELINE = ROOT / "references" / "v1.1-baseline.json"
 SIGNAL_VOICE_CONTRACT = ROOT / "examples" / "signal-voice.installation-contract.json"
 COMPOSED_INSTALLATION_CONTRACT = (
@@ -324,6 +327,7 @@ class SafeUpdateTest(unittest.TestCase):
         self,
         *extra: str,
         include_attestation: bool = True,
+        output_dir: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         attestation_args = (
             ["--installation-attestation", str(self.attestation)]
@@ -338,7 +342,7 @@ class SafeUpdateTest(unittest.TestCase):
                 "--input-dir",
                 str(self.input),
                 "--output-dir",
-                str(self.root / "output"),
+                str(output_dir or self.root / "output"),
                 "--coverage",
                 str(self.coverage),
                 "--conservative-inputs",
@@ -811,6 +815,7 @@ class SafeUpdateTest(unittest.TestCase):
         )
         gate_schema = json.loads(CONSERVATIVE_GATES_SCHEMA.read_text())
         input_schema = json.loads(CONSERVATIVE_INPUTS_SCHEMA.read_text())
+        impact_schema = json.loads(IMPACT_SHADOW_SCHEMA.read_text())
         self.assertEqual(
             gate_schema["properties"]["schema"]["const"],
             SAFE_UPDATE.CONSERVATIVE_GATES_SCHEMA,
@@ -821,6 +826,16 @@ class SafeUpdateTest(unittest.TestCase):
         )
         self.assertFalse(gate_schema["additionalProperties"])
         self.assertFalse(input_schema["additionalProperties"])
+        self.assertEqual(
+            impact_schema["properties"]["schema"]["const"],
+            SAFE_UPDATE.IMPACT_SHADOW_SCHEMA,
+        )
+        self.assertFalse(impact_schema["properties"]["authoritative"]["const"])
+        self.assertEqual(
+            impact_schema["properties"]["would_omit_checks"]["maxItems"],
+            0,
+        )
+        self.assertFalse(impact_schema["additionalProperties"])
         self.assertEqual(baseline["commit"], BASELINE_SHA)
         self.assertEqual(baseline["test_case_count"], 13)
         self.assertEqual(baseline["test_cases"], BASELINE_TEST_CASES)
@@ -1288,6 +1303,223 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertEqual(status, "success")
         self.assertEqual(report["handling"], "conservative")
         self.assertNotIn("fast", SAFE_UPDATE.GATE_HANDLING)
+
+    def test_impact_shadow_is_removable_without_changing_ready_decision(self) -> None:
+        enabled_output = self.root / "shadow-enabled"
+        disabled_output = self.root / "shadow-disabled"
+
+        enabled = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=enabled_output,
+        )
+        disabled = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            "--disable-impact-shadow",
+            output_dir=disabled_output,
+        )
+
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        enabled_status = json.loads((enabled_output / "verdict.json").read_text())
+        disabled_status = json.loads((disabled_output / "verdict.json").read_text())
+        shadow = json.loads((enabled_output / "impact-shadow.json").read_text())
+        evidence = json.loads((enabled_output / "evidence-bundle.json").read_text())
+        self.assertEqual(
+            enabled_status["decision_content"],
+            disabled_status["decision_content"],
+        )
+        self.assertEqual(
+            enabled_status["decision_digest"],
+            disabled_status["decision_digest"],
+        )
+        self.assertEqual(enabled_status["verdict"], disabled_status["verdict"])
+        self.assertFalse((disabled_output / "impact-shadow.json").exists())
+        self.assertNotIn("impact_shadow", enabled_status["decision_content"])
+        self.assertFalse(
+            any(
+                item["path"] == "impact-shadow.json"
+                for item in evidence["evidence"]
+            )
+        )
+        self.assertFalse(shadow["authoritative"])
+        self.assertEqual(shadow["would_omit_checks"], [])
+        self.assertIn("conversation-runtime", shadow["affected_capabilities"])
+        self.assertIn("signal", shadow["affected_capabilities"])
+        self.assertIn(
+            "shadow:risk:unmapped-members",
+            {item["id"] for item in shadow["would_flag_risks"]},
+        )
+        self.assertTrue(
+            all(
+                item["id"].startswith(SAFE_UPDATE.SHADOW_ID_PREFIX)
+                for item in shadow["would_add_checks"]
+            )
+        )
+        unmapped = {
+            (item["package"], item["change"], item["member"])
+            for item in shadow["unmapped_members"]
+        }
+        self.assertIn(("openclaw", "added", "package/added.js"), unmapped)
+        self.assertIn(("openclaw", "removed", "package/removed.js"), unmapped)
+
+    def test_impact_shadow_digest_is_stable_across_run_envelopes(self) -> None:
+        first_output = self.root / "shadow-first"
+        second_output = self.root / "shadow-second"
+
+        first = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=first_output,
+        )
+        second = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=second_output,
+        )
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        first_shadow = json.loads((first_output / "impact-shadow.json").read_text())
+        second_shadow = json.loads((second_output / "impact-shadow.json").read_text())
+        self.assertEqual(first_shadow["shadow_digest"], second_shadow["shadow_digest"])
+        for shadow in (first_shadow, second_shadow):
+            shadow.pop("generated_at")
+        self.assertEqual(first_shadow, second_shadow)
+
+    def test_impact_shadow_is_removable_without_changing_blocked_decision(self) -> None:
+        enabled_output = self.root / "blocked-shadow-enabled"
+        disabled_output = self.root / "blocked-shadow-disabled"
+
+        enabled = self.run_simulation(output_dir=enabled_output)
+        disabled = self.run_simulation(
+            "--disable-impact-shadow",
+            output_dir=disabled_output,
+        )
+
+        self.assertEqual(enabled.returncode, 2)
+        self.assertEqual(disabled.returncode, 2)
+        enabled_status = json.loads((enabled_output / "verdict.json").read_text())
+        disabled_status = json.loads((disabled_output / "verdict.json").read_text())
+        self.assertEqual(enabled_status["verdict"], "blocked")
+        self.assertEqual(
+            enabled_status["decision_content"],
+            disabled_status["decision_content"],
+        )
+        self.assertEqual(
+            enabled_status["decision_digest"],
+            disabled_status["decision_digest"],
+        )
+
+    def test_impact_shadow_preserves_transitive_false_green_as_unmapped(
+        self,
+    ) -> None:
+        metadata_path = self.input / "input-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["core_candidate"]["target"] = core_closure(
+            "1.1.0",
+            [("@example/message-codec", "3.5.0")],
+            root_integrity=integrity(self.target_archive),
+        )
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        enabled_output = self.root / "closure-shadow-enabled"
+        disabled_output = self.root / "closure-shadow-disabled"
+
+        enabled = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=enabled_output,
+        )
+        disabled = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            "--disable-impact-shadow",
+            output_dir=disabled_output,
+        )
+
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        shadow = json.loads((enabled_output / "impact-shadow.json").read_text())
+        enabled_status = json.loads((enabled_output / "verdict.json").read_text())
+        disabled_status = json.loads((disabled_output / "verdict.json").read_text())
+        self.assertIn("@example/message-codec", shadow["unmapped_packages"])
+        self.assertTrue(shadow["would_block"])
+        self.assertEqual(
+            enabled_status["decision_content"],
+            disabled_status["decision_content"],
+        )
+        self.assertEqual(enabled_status["verdict"], "ready_for_operator_plan")
+
+    def test_impact_shadow_rejects_reserved_namespace_without_blocking_baseline(
+        self,
+    ) -> None:
+        checks, _, _ = SAFE_UPDATE.load_customizations(self.customizations, False)
+        coverage, _, _ = SAFE_UPDATE.load_coverage(self.coverage, False)
+        contract = SAFE_UPDATE.adapt_v1_installation_contract(checks, coverage)
+        shadow = SAFE_UPDATE.build_impact_shadow(
+            authority_packages=[],
+            core_candidate_lock={
+                "status": "success",
+                "changed_packages": [],
+                "errors": [],
+            },
+            installation_contract=contract,
+            baseline_check_ids={"shadow:baseline-collision"},
+            authority_complete=True,
+            common={
+                "generated_at": "2026-07-18T12:00:00+00:00",
+                **SAFE_UPDATE.safety_fields(),
+            },
+        )
+
+        self.assertEqual(shadow["status"], "failed")
+        self.assertIn(
+            "baseline or component ID collides with reserved shadow namespace",
+            shadow["errors"],
+        )
+
+    def test_impact_shadow_preserves_unparseable_archive_refs_as_errors(self) -> None:
+        checks, _, _ = SAFE_UPDATE.load_customizations(self.customizations, False)
+        coverage, _, _ = SAFE_UPDATE.load_coverage(self.coverage, False)
+        contract = SAFE_UPDATE.adapt_v1_installation_contract(checks, coverage)
+        contract["components"][0]["artifacts"][0]["ref"] = "missing-package-separator"
+
+        shadow = SAFE_UPDATE.build_impact_shadow(
+            authority_packages=[
+                {
+                    "name": "openclaw",
+                    "archive_diff": {
+                        "added": [],
+                        "removed": [],
+                        "changed": ["package/extensions/signal/index.js"],
+                    },
+                    "metadata_changed_fields": [],
+                    "risk_findings": [],
+                }
+            ],
+            core_candidate_lock={
+                "status": "success",
+                "changed_packages": [],
+                "errors": [],
+            },
+            installation_contract=contract,
+            baseline_check_ids={item["id"] for item in checks},
+            authority_complete=True,
+            common={
+                "generated_at": "2026-07-18T12:00:00+00:00",
+                **SAFE_UPDATE.safety_fields(),
+            },
+        )
+
+        self.assertEqual(shadow["status"], "failed")
+        self.assertTrue(
+            any("unparseable npm_archive_member ref" in error for error in shadow["errors"])
+        )
+        self.assertIn(
+            "package/extensions/signal/index.js",
+            {item["member"] for item in shadow["unmapped_members"]},
+        )
 
     def test_missing_customization_manifest_blocks_and_keeps_artifacts(self) -> None:
         result = self.run_simulation()

@@ -166,6 +166,7 @@ Inspect these artifacts:
 - `installation-candidate-lock.json`
 - `installation-attestation.json`
 - `conservative-gates.json`
+- `impact-shadow.json` (non-authoritative and removable)
 - `synthetic-update.json`
 - `customization-compatibility.json`
 - `coverage-report.json`
@@ -176,6 +177,11 @@ Inspect these artifacts:
 - `operator-plan.md`
 
 If the verdict is `blocked`, report the failed evidence, affected surface, and what must be proven; do not invent a repair. If it is `ready_for_operator_plan`, review the generated plan, add the verified backup, exact rollback, maintenance window, and scoped mutation command. `post-upgrade-e2e.json` remains `not_run` until a separately approved update has happened. Stop before apply.
+
+`impact-shadow.json` can only describe hypothetical additional checks and
+risks. It must never remove a baseline check, enter the evidence bundle, or
+change `decision_content`, `decision_digest`, required evidence, or verdict.
+Use `--disable-impact-shadow` to verify that parity.
 
 For an independent model review, send only the generated sanitized summaries and public package diffs. Reviewer success does not change the verdict or grant approval.
 
