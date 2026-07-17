@@ -172,6 +172,7 @@
           "type": "object",
           "required": [
             "runtime_truth",
+            "core_candidate_lock",
             "synthetic_update",
             "customization_compatibility",
             "installation_coverage",
@@ -179,6 +180,12 @@
           ],
           "properties": {
             "runtime_truth": {
+              "enum": [
+                "success",
+                "failed"
+              ]
+            },
+            "core_candidate_lock": {
               "enum": [
                 "success",
                 "failed"

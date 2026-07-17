@@ -23,6 +23,10 @@ EFFECT = "read_only_openclaw_update_rehearsal"
 INPUT_SCHEMA = "openclaw.safe_update.input.v1"
 CUSTOMIZATIONS_SCHEMA = "openclaw.safe_update.customizations.v1"
 COVERAGE_SCHEMA = "openclaw.safe_update.coverage.v1"
+CORE_CLOSURE_SCHEMA = "openclaw.safe_update.core_closure.v1"
+CORE_CANDIDATE_LOCK_SCHEMA = "openclaw.safe_update.core_candidate_lock.v1"
+CORE_CLOSURE_ANALYZER_VERSION = "1.0.0"
+CORE_CLOSURE_POLICY_VERSION = "1"
 STATUS_SCHEMA = "openclaw.safe_update.status.v2"
 DECISION_SCHEMA = "openclaw.safe_update.decision.v1"
 LEGACY_VERDICT_SCHEMA = "openclaw.safe_update.verdict.v1"
@@ -64,6 +68,7 @@ DECISION_FIELDS = frozenset(
 EVIDENCE_STATUS_FIELDS = frozenset(
     {
         "runtime_truth",
+        "core_candidate_lock",
         "synthetic_update",
         "customization_compatibility",
         "installation_coverage",
@@ -384,7 +389,12 @@ def inventory(args: argparse.Namespace) -> int:
     coverage_draft = {
         "schema": COVERAGE_SCHEMA,
         "install_shape": "npm_global_linux",
-        "runtime": {"node_version": node_version},
+        "runtime": {
+            "node_version": node_version,
+            "os": platform.system().lower(),
+            "arch": platform.machine().lower(),
+            "libc": (platform.libc_ver()[0] or "unknown").lower(),
+        },
         "surfaces": [],
         "draft": True,
         "instructions": (
@@ -452,7 +462,16 @@ def parse_packages(raw: str, current_version: str, target_version: str) -> list[
     return packages
 
 
-def run_npm_json(arguments: list[str], cache_dir: Path) -> Any:
+def run_npm_json(
+    arguments: list[str],
+    cache_dir: Path,
+    working_dir: Path | None = None,
+    environment_overrides: dict[str, str] | None = None,
+) -> Any:
+    user_config = cache_dir / "user.npmrc"
+    global_config = cache_dir / "global.npmrc"
+    user_config.touch(exist_ok=True)
+    global_config.touch(exist_ok=True)
     environment = os.environ.copy()
     environment.update(
         {
@@ -463,11 +482,16 @@ def run_npm_json(arguments: list[str], cache_dir: Path) -> Any:
             "NPM_CONFIG_CACHE": str(cache_dir),
             "NPM_CONFIG_LOGS_DIR": str(cache_dir / "_logs"),
             "NPM_CONFIG_REGISTRY": NPM_REGISTRY,
+            "NPM_CONFIG_USERCONFIG": str(user_config),
+            "NPM_CONFIG_GLOBALCONFIG": str(global_config),
+            "NPM_CONFIG_MIN_RELEASE_AGE": "0",
+            **(environment_overrides or {}),
         }
     )
     try:
         completed = subprocess.run(
             ["npm", *arguments],
+            cwd=working_dir,
             check=True,
             capture_output=True,
             text=True,
@@ -484,6 +508,198 @@ def run_npm_json(arguments: list[str], cache_dir: Path) -> Any:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         raise RehearsalError("npm returned non-JSON output") from exc
+
+
+def command_version(command: str) -> str:
+    try:
+        completed = subprocess.run(
+            [command, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RehearsalError(f"{command} is not available") from exc
+    value = completed.stdout.strip().removeprefix("v")
+    if semver_tuple(value) is None:
+        raise RehearsalError(f"{command} returned a non-exact version")
+    return value
+
+
+def package_name_from_lock_path(path: str) -> str:
+    marker = "node_modules/"
+    if marker not in path:
+        raise RehearsalError(f"unsupported lockfile package path: {path!r}")
+    suffix = path.rsplit(marker, 1)[1]
+    parts = suffix.split("/")
+    name = "/".join(parts[:2]) if suffix.startswith("@") else parts[0]
+    if not PACKAGE_RE.fullmatch(name):
+        raise RehearsalError(f"invalid package name in lockfile path: {path!r}")
+    return name
+
+
+def selector_matches(values: Any, actual: str) -> bool:
+    if values is None:
+        return True
+    if not isinstance(values, list) or any(not isinstance(item, str) or not item for item in values):
+        raise RehearsalError("package platform selector must be a list of strings")
+    positives = {item for item in values if not item.startswith("!")}
+    negatives = {item[1:] for item in values if item.startswith("!")}
+    return actual not in negatives and (not positives or actual in positives)
+
+
+def normalized_string_map(value: Any, field: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str)
+        for key, item in value.items()
+    ):
+        raise RehearsalError(f"lockfile {field} must be a string map")
+    return dict(sorted(value.items()))
+
+
+def build_core_closure(
+    lockfile: Any,
+    package: str,
+    version: str,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    if not isinstance(lockfile, dict) or lockfile.get("lockfileVersion") not in {2, 3}:
+        raise RehearsalError("npm lockfileVersion must be 2 or 3")
+    lock_packages = lockfile.get("packages")
+    if not isinstance(lock_packages, dict) or not lock_packages:
+        raise RehearsalError("npm lockfile packages are missing")
+    if set(environment) != {"node_version", "npm_version", "os", "arch", "libc"}:
+        raise RehearsalError("core closure environment is incomplete")
+    if any(not isinstance(value, str) or not value for value in environment.values()):
+        raise RehearsalError("core closure environment values must be non-empty strings")
+    if semver_tuple(environment["node_version"]) is None or semver_tuple(environment["npm_version"]) is None:
+        raise RehearsalError("core closure tool versions must be exact")
+
+    packages: list[dict[str, Any]] = []
+    for path, value in lock_packages.items():
+        if path == "":
+            continue
+        if not isinstance(path, str) or not isinstance(value, dict):
+            raise RehearsalError("npm lockfile package entry is invalid")
+        if "link" in value:
+            raise RehearsalError(f"mutable link dependency is unsupported: {path}")
+        resolved = value.get("resolved")
+        integrity = value.get("integrity")
+        package_version = value.get("version")
+        if (
+            not isinstance(package_version, str)
+            or not VERSION_RE.fullmatch(package_version)
+            or not isinstance(resolved, str)
+            or not resolved.startswith(f"{NPM_REGISTRY}/")
+            or not isinstance(integrity, str)
+            or not integrity.startswith(("sha512-", "sha1-"))
+        ):
+            raise RehearsalError(f"package closure lacks immutable registry identity: {path}")
+        selectors = {
+            "os": value.get("os"),
+            "cpu": value.get("cpu"),
+            "libc": value.get("libc"),
+        }
+        selected = (
+            selector_matches(selectors["os"], environment["os"])
+            and selector_matches(selectors["cpu"], environment["arch"])
+            and selector_matches(selectors["libc"], environment["libc"])
+        )
+        package_name = value.get("name") or package_name_from_lock_path(path)
+        if not isinstance(package_name, str) or not PACKAGE_RE.fullmatch(package_name):
+            raise RehearsalError(f"invalid package name in lockfile entry: {path!r}")
+        packages.append(
+            {
+                "path": path,
+                "name": package_name,
+                "version": package_version,
+                "resolved": resolved,
+                "integrity": integrity,
+                "dependencies": normalized_string_map(value.get("dependencies"), "dependencies"),
+                "optional_dependencies": normalized_string_map(
+                    value.get("optionalDependencies"), "optionalDependencies"
+                ),
+                "peer_dependencies": normalized_string_map(
+                    value.get("peerDependencies"), "peerDependencies"
+                ),
+                "flags": {
+                    "dev": value.get("dev") is True,
+                    "optional": value.get("optional") is True,
+                    "peer": value.get("peer") is True,
+                    "in_bundle": value.get("inBundle") is True,
+                    "has_install_script": value.get("hasInstallScript") is True,
+                },
+                "selectors": {
+                    key: sorted(item) if isinstance(item, list) else []
+                    for key, item in selectors.items()
+                },
+                "selected_for_platform": selected,
+            }
+        )
+    packages.sort(key=lambda item: (item["path"], item["name"], item["version"]))
+    if not any(item["name"] == package and item["version"] == version for item in packages):
+        raise RehearsalError(f"resolved closure does not contain {package}@{version}")
+    content = {
+        "schema": CORE_CLOSURE_SCHEMA,
+        "root_package": {"name": package, "version": version},
+        "environment": dict(sorted(environment.items())),
+        "resolver": {
+            "analyzer_version": CORE_CLOSURE_ANALYZER_VERSION,
+            "policy_version": CORE_CLOSURE_POLICY_VERSION,
+            "registry": NPM_REGISTRY,
+            "lockfile_version": lockfile["lockfileVersion"],
+            "package_lock_only": True,
+            "ignore_scripts": True,
+            "include_optional": True,
+            "min_release_age_days": 0,
+            "isolated_npm_config": True,
+        },
+        "packages": packages,
+    }
+    return {**content, "root": canonical_digest(content)}
+
+
+def resolve_core_closure(
+    package: str,
+    version: str,
+    cache_dir: Path,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="openclaw-safe-update-lock-") as temporary:
+        root = Path(temporary)
+        write_json(
+            root / "package.json",
+            {
+                "name": "openclaw-safe-update-candidate",
+                "version": "0.0.0",
+                "private": True,
+                "dependencies": {package: version},
+            },
+        )
+        run_npm_json(
+            [
+                "install",
+                "--json",
+                "--package-lock-only",
+                "--ignore-scripts",
+                "--include=optional",
+            ],
+            cache_dir,
+            root,
+            {
+                "NPM_CONFIG_OS": environment["os"],
+                "NPM_CONFIG_CPU": environment["arch"],
+                "NPM_CONFIG_LIBC": environment["libc"],
+            },
+        )
+        return build_core_closure(
+            read_json(root / "package-lock.json"),
+            package,
+            version,
+            environment,
+        )
 
 
 def registry_metadata(package: str, version: str, cache_dir: Path) -> dict[str, Any]:
@@ -521,7 +737,18 @@ def fetch(args: argparse.Namespace) -> int:
         raise RehearsalError(f"output directory must be empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
     packages = parse_packages(args.packages_json, args.current_version, args.target_version)
+    core_packages = [item for item in packages if item["name"] == "openclaw"]
+    if len(core_packages) != 1:
+        raise RehearsalError("packages must contain exactly one openclaw core package")
+    environment = {
+        "node_version": command_version("node"),
+        "npm_version": command_version("npm"),
+        "os": args.platform_os,
+        "arch": args.platform_arch,
+        "libc": args.platform_libc,
+    }
     records: list[dict[str, Any]] = []
+    core_candidate: dict[str, Any] = {"package": "openclaw"}
     with tempfile.TemporaryDirectory(prefix="openclaw-safe-update-npm-") as cache:
         cache_dir = Path(cache)
         for package in packages:
@@ -534,6 +761,14 @@ def fetch(args: argparse.Namespace) -> int:
                 )
                 record[lane] = metadata
             records.append(record)
+        core_package = core_packages[0]
+        for lane in ("current", "target"):
+            core_candidate[lane] = resolve_core_closure(
+                "openclaw",
+                core_package[lane],
+                cache_dir,
+                environment,
+            )
 
     document = {
         "schema": INPUT_SCHEMA,
@@ -542,10 +777,237 @@ def fetch(args: argparse.Namespace) -> int:
         "current_version": args.current_version,
         "target_version": args.target_version,
         "packages": records,
+        "core_candidate": core_candidate,
     }
     write_json(output / "input-metadata.json", document)
     print(output / "input-metadata.json")
     return 0
+
+
+def validate_core_closure(value: Any, package: str, version: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("schema") != CORE_CLOSURE_SCHEMA:
+        raise RehearsalError(f"core closure schema must be {CORE_CLOSURE_SCHEMA}")
+    content = {key: item for key, item in value.items() if key != "root"}
+    if set(content) != {"schema", "root_package", "environment", "resolver", "packages"}:
+        raise RehearsalError("core closure contains unknown or missing fields")
+    if value.get("root") != canonical_digest(content):
+        raise RehearsalError("core closure root does not match canonical content")
+    if content.get("root_package") != {"name": package, "version": version}:
+        raise RehearsalError(f"core closure root package mismatch for {package}@{version}")
+    resolver = content.get("resolver")
+    if not isinstance(resolver, dict) or resolver != {
+        "analyzer_version": CORE_CLOSURE_ANALYZER_VERSION,
+        "policy_version": CORE_CLOSURE_POLICY_VERSION,
+        "registry": NPM_REGISTRY,
+        "lockfile_version": resolver.get("lockfile_version") if isinstance(resolver, dict) else None,
+        "package_lock_only": True,
+        "ignore_scripts": True,
+        "include_optional": True,
+        "min_release_age_days": 0,
+        "isolated_npm_config": True,
+    }:
+        raise RehearsalError("core closure resolver invariants are invalid")
+    if resolver["lockfile_version"] not in {2, 3}:
+        raise RehearsalError("core closure lockfile version is unsupported")
+    environment = content.get("environment")
+    if not isinstance(environment, dict) or set(environment) != {
+        "node_version",
+        "npm_version",
+        "os",
+        "arch",
+        "libc",
+    }:
+        raise RehearsalError("core closure environment is invalid")
+    if semver_tuple(str(environment.get("node_version", ""))) is None or semver_tuple(
+        str(environment.get("npm_version", ""))
+    ) is None:
+        raise RehearsalError("core closure tool versions are invalid")
+    packages = content.get("packages")
+    if not isinstance(packages, list) or not packages:
+        raise RehearsalError("core closure packages are missing")
+    if packages != sorted(
+        packages,
+        key=lambda item: (item.get("path"), item.get("name"), item.get("version"))
+        if isinstance(item, dict)
+        else ("", "", ""),
+    ):
+        raise RehearsalError("core closure packages are not canonical")
+    for item in packages:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "path",
+                "name",
+                "version",
+                "resolved",
+                "integrity",
+                "dependencies",
+                "optional_dependencies",
+                "peer_dependencies",
+                "flags",
+                "selectors",
+                "selected_for_platform",
+            }
+            or not isinstance(item.get("name"), str)
+            or not isinstance(item.get("path"), str)
+            or not isinstance(item.get("version"), str)
+            or not VERSION_RE.fullmatch(item["version"])
+            or not isinstance(item.get("resolved"), str)
+            or not item["resolved"].startswith(f"{NPM_REGISTRY}/")
+            or not isinstance(item.get("integrity"), str)
+            or not item["integrity"].startswith(("sha512-", "sha1-"))
+            or not isinstance(item.get("selected_for_platform"), bool)
+        ):
+            raise RehearsalError("core closure package entry is invalid")
+        for field in ("dependencies", "optional_dependencies", "peer_dependencies"):
+            if normalized_string_map(item.get(field), field) != item.get(field):
+                raise RehearsalError(f"core closure package {field} is not canonical")
+        flags = item.get("flags")
+        if (
+            not isinstance(flags, dict)
+            or set(flags)
+            != {"dev", "optional", "peer", "in_bundle", "has_install_script"}
+            or any(not isinstance(flag, bool) for flag in flags.values())
+        ):
+            raise RehearsalError("core closure package flags are invalid")
+        selectors = item.get("selectors")
+        if (
+            not isinstance(selectors, dict)
+            or set(selectors) != {"os", "cpu", "libc"}
+            or any(
+                not isinstance(values, list)
+                or values != sorted(values)
+                or any(not isinstance(selector, str) or not selector for selector in values)
+                for values in selectors.values()
+            )
+        ):
+            raise RehearsalError("core closure package selectors are invalid")
+    return value
+
+
+def compare_core_closures(current: dict[str, Any], target: dict[str, Any]) -> list[dict[str, Any]]:
+    current_packages = {
+        (item["path"], item["name"]): item for item in current["packages"]
+    }
+    target_packages = {
+        (item["path"], item["name"]): item for item in target["packages"]
+    }
+    changes: list[dict[str, Any]] = []
+    for key in sorted(set(current_packages) | set(target_packages)):
+        before = current_packages.get(key)
+        after = target_packages.get(key)
+        if before == after:
+            continue
+        changes.append(
+            {
+                "path": key[0],
+                "name": key[1],
+                "change": "added" if before is None else "removed" if after is None else "changed",
+                "current_version": before.get("version") if before else None,
+                "target_version": after.get("version") if after else None,
+                "current_selected": before.get("selected_for_platform") if before else None,
+                "target_selected": after.get("selected_for_platform") if after else None,
+                "current_flags": before.get("flags") if before else None,
+                "target_flags": after.get("flags") if after else None,
+            }
+        )
+    return changes
+
+
+def build_core_candidate_lock(
+    metadata: Any,
+    runtime_environment: dict[str, Any],
+    common: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    errors: list[str] = []
+    current: dict[str, Any] = {}
+    target: dict[str, Any] = {}
+    try:
+        if not isinstance(metadata, dict):
+            raise RehearsalError("input metadata is unavailable")
+        candidate = metadata.get("core_candidate")
+        if not isinstance(candidate, dict) or candidate.get("package") != "openclaw":
+            raise RehearsalError("input metadata lacks the openclaw core candidate closure")
+        current = validate_core_closure(
+            candidate.get("current"),
+            "openclaw",
+            str(metadata.get("current_version", "")),
+        )
+        target = validate_core_closure(
+            candidate.get("target"),
+            "openclaw",
+            str(metadata.get("target_version", "")),
+        )
+        if current["environment"] != target["environment"]:
+            raise RehearsalError("current and target core closures use different environments")
+        expected_platform = {
+            key: runtime_environment.get(key) for key in ("os", "arch", "libc")
+        }
+        if {
+            key: target["environment"].get(key) for key in ("os", "arch", "libc")
+        } != expected_platform:
+            raise RehearsalError(
+                "core closure platform does not match the declared runtime platform"
+            )
+        package_entries = metadata.get("packages")
+        openclaw_entry = next(
+            (
+                item
+                for item in package_entries
+                if isinstance(item, dict) and item.get("name") == "openclaw"
+            ),
+            None,
+        ) if isinstance(package_entries, list) else None
+        if not isinstance(openclaw_entry, dict):
+            raise RehearsalError("input metadata lacks openclaw package evidence")
+        for lane, closure in (("current", current), ("target", target)):
+            package_metadata = openclaw_entry.get(lane)
+            if not isinstance(package_metadata, dict):
+                raise RehearsalError(f"openclaw {lane} package evidence is missing")
+            root_entry = next(
+                (
+                    item
+                    for item in closure["packages"]
+                    if item["name"] == "openclaw"
+                    and item["version"] == closure["root_package"]["version"]
+                ),
+                None,
+            )
+            if (
+                not isinstance(root_entry, dict)
+                or package_metadata.get("version") != closure["root_package"]["version"]
+                or package_metadata.get("integrity") != root_entry.get("integrity")
+            ):
+                raise RehearsalError(
+                    f"openclaw {lane} closure does not match package evidence"
+                )
+        current_by_key = {
+            (item["path"], item["name"]): item for item in current["packages"]
+        }
+        for item in target["packages"]:
+            previous = current_by_key.get((item["path"], item["name"]))
+            if item["flags"]["has_install_script"] and (
+                previous is None or not previous["flags"]["has_install_script"]
+            ):
+                raise RehearsalError(
+                    f"target closure adds a transitive install script: {item['name']}"
+                )
+    except RehearsalError as exc:
+        errors.append(str(exc))
+    status = "failed" if errors else "success"
+    report = {
+        "schema": CORE_CANDIDATE_LOCK_SCHEMA,
+        **common,
+        "status": status,
+        "package": "openclaw",
+        "current_root": current.get("root"),
+        "target_root": target.get("root"),
+        "environment": target.get("environment"),
+        "changed_packages": compare_core_closures(current, target) if not errors else [],
+        "errors": errors,
+    }
+    return report, status
 
 
 def validate_member(member: tarfile.TarInfo) -> None:
@@ -789,6 +1251,14 @@ def load_coverage(
     node_version = runtime.get("node_version")
     if not isinstance(node_version, str) or semver_tuple(node_version) is None:
         errors.append("coverage runtime.node_version must be an exact version")
+    for field in ("os", "arch", "libc"):
+        runtime_value = runtime.get(field)
+        if (
+            not isinstance(runtime_value, str)
+            or not runtime_value
+            or runtime_value == "unknown"
+        ):
+            errors.append(f"coverage runtime.{field} must be explicit")
 
     surfaces = value.get("surfaces")
     if not isinstance(surfaces, list):
@@ -839,7 +1309,12 @@ def load_coverage(
         )
     return {
         "install_shape": install_shape,
-        "runtime": {"node_version": node_version},
+        "runtime": {
+            "node_version": node_version,
+            "os": runtime.get("os"),
+            "arch": runtime.get("arch"),
+            "libc": runtime.get("libc"),
+        },
         "surfaces": normalized,
     }, errors, "configured"
 
@@ -914,6 +1389,12 @@ def simulate(args: argparse.Namespace) -> int:
         args.allow_no_coverage,
     )
     if coverage_mode == "explicitly_not_required":
+        runtime_arguments = {
+            "node_version": args.runtime_node_version,
+            "os": args.runtime_os,
+            "arch": args.runtime_arch,
+            "libc": args.runtime_libc,
+        }
         if (
             not isinstance(args.runtime_node_version, str)
             or semver_tuple(args.runtime_node_version) is None
@@ -921,8 +1402,13 @@ def simulate(args: argparse.Namespace) -> int:
             coverage_errors.append(
                 "--runtime-node-version is required when --allow-no-coverage is used"
             )
-        else:
-            coverage_profile["runtime"]["node_version"] = args.runtime_node_version
+        for field in ("os", "arch", "libc"):
+            value = runtime_arguments[field]
+            if not isinstance(value, str) or not value or value == "unknown":
+                coverage_errors.append(
+                    f"--runtime-{field} is required when --allow-no-coverage is used"
+                )
+        coverage_profile["runtime"].update(runtime_arguments)
     runtime_node_version = coverage_profile.get("runtime", {}).get("node_version")
 
     try:
@@ -932,6 +1418,11 @@ def simulate(args: argparse.Namespace) -> int:
         runtime_errors.append(str(exc))
     if not isinstance(metadata, dict) or metadata.get("schema") != INPUT_SCHEMA:
         runtime_errors.append(f"input schema must be {INPUT_SCHEMA}")
+    core_candidate_lock, core_candidate_status = build_core_candidate_lock(
+        metadata,
+        coverage_profile.get("runtime", {}),
+        common,
+    )
     packages = metadata.get("packages") if isinstance(metadata, dict) else None
     if not isinstance(packages, list) or not packages:
         runtime_errors.append("input metadata must contain packages")
@@ -1127,11 +1618,13 @@ def simulate(args: argparse.Namespace) -> int:
     }
 
     runtime_path = output_dir / "runtime-truth.json"
+    core_candidate_path = output_dir / "core-candidate-lock.json"
     synthetic_path = output_dir / "synthetic-update.json"
     customization_path = output_dir / "customization-compatibility.json"
     coverage_path = output_dir / "coverage-report.json"
     postcheck_path = output_dir / "post-upgrade-e2e.json"
     write_json(runtime_path, runtime_truth)
+    write_json(core_candidate_path, core_candidate_lock)
     write_json(synthetic_path, synthetic)
     write_json(customization_path, customizations)
     write_json(coverage_path, coverage_report)
@@ -1139,7 +1632,13 @@ def simulate(args: argparse.Namespace) -> int:
 
     blocked = any(
         status != "success"
-        for status in (runtime_status, synthetic_status, customization_status, coverage_status)
+        for status in (
+            runtime_status,
+            core_candidate_status,
+            synthetic_status,
+            customization_status,
+            coverage_status,
+        )
     )
     verdict_value = "blocked" if blocked else "ready_for_operator_plan"
     evidence = {
@@ -1149,6 +1648,7 @@ def simulate(args: argparse.Namespace) -> int:
         "verdict": verdict_value,
         "evidence": [
             artifact_reference(runtime_path, runtime_status),
+            artifact_reference(core_candidate_path, core_candidate_status),
             artifact_reference(synthetic_path, synthetic_status),
             artifact_reference(customization_path, customization_status),
             artifact_reference(coverage_path, coverage_status),
@@ -1168,6 +1668,7 @@ def simulate(args: argparse.Namespace) -> int:
         reason_code="required_evidence_failed" if blocked else "baseline_rehearsal_passed",
         evidence_status={
             "runtime_truth": runtime_status,
+            "core_candidate_lock": core_candidate_status,
             "synthetic_update": synthetic_status,
             "customization_compatibility": customization_status,
             "installation_coverage": coverage_status,
@@ -1211,6 +1712,7 @@ def simulate(args: argparse.Namespace) -> int:
         f"- Current version: `{metadata.get('current_version', 'unknown')}`\n"
         f"- Target version: `{metadata.get('target_version', 'unknown')}`\n"
         f"- Runtime evidence: `{runtime_status}`\n"
+        f"- Core candidate lock: `{core_candidate_status}`\n"
         f"- Package evidence: `{synthetic_status}`\n"
         f"- Customization evidence: `{customization_status}`\n"
         f"- Installation coverage: `{coverage_status}`\n"
@@ -1241,6 +1743,12 @@ def parser() -> argparse.ArgumentParser:
     fetch_parser.add_argument("--current-version", required=True)
     fetch_parser.add_argument("--target-version", required=True)
     fetch_parser.add_argument("--packages-json", default='["openclaw"]')
+    fetch_parser.add_argument("--platform-os", default=platform.system().lower())
+    fetch_parser.add_argument("--platform-arch", default=platform.machine().lower())
+    fetch_parser.add_argument(
+        "--platform-libc",
+        default=(platform.libc_ver()[0] or "unknown").lower(),
+    )
     fetch_parser.add_argument("--output-dir", type=Path, required=True)
     fetch_parser.set_defaults(handler=fetch)
 
@@ -1251,6 +1759,9 @@ def parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--coverage", type=Path)
     simulate_parser.add_argument("--allow-no-coverage", action="store_true")
     simulate_parser.add_argument("--runtime-node-version")
+    simulate_parser.add_argument("--runtime-os")
+    simulate_parser.add_argument("--runtime-arch")
+    simulate_parser.add_argument("--runtime-libc")
     simulate_parser.add_argument("--output-dir", type=Path, required=True)
     simulate_parser.set_defaults(handler=simulate)
     return root
