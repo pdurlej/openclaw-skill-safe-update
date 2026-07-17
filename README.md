@@ -141,14 +141,16 @@ service, persona, attachment, and voice surface you need to preserve.
 
 Replace both example manifests with checks for your actual system. A genuinely
 vanilla deployment can use `--allow-no-customizations --allow-no-coverage
---runtime-node-version <exact-version>`, but that explicit escape hatch removes
-most of the protection this project exists to provide.
+--runtime-node-version <exact-version> --runtime-os <os> --runtime-arch <arch>
+--runtime-libc <libc>`, but that explicit escape hatch removes most of the
+protection this project exists to provide.
 
 ## What you get
 
 | Artifact | Purpose |
 | --- | --- |
 | `runtime-truth.json` | Exact package coordinates and integrity receipts |
+| `core-candidate-lock.json` | Resolved OpenClaw dependency closure, platform/toolchain identity, and current-to-target package drift |
 | `installation-contract.json` | Capability/component graph translated from the v1.1 declarations |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
@@ -159,11 +161,14 @@ most of the protection this project exists to provide.
 | `summary.md` | Human-readable review surface |
 | `operator-plan.md` | Rollback-aware preparation that explicitly stops before apply |
 
-`ready_for_operator_plan` means exact package, customization, runtime, and
-declared installation-coverage evidence passed. It does **not** mean “update
-now,” and it does not pretend that post-upgrade checks already ran. A real
-operator still needs a verified backup, a lossless rollback, a maintenance
-window, and explicit approval for the exact mutation.
+`ready_for_operator_plan` means the exact package archives, resolved OpenClaw
+core closure, customization, runtime, and declared installation-coverage
+evidence passed. The closure resolver uses an isolated npm configuration,
+never runs lifecycle scripts, and binds exact transitive, peer, optional, and
+platform-selected packages into the candidate root. It does **not** mean
+“update now,” and it does not pretend that post-upgrade checks already ran. A
+real operator still needs a verified backup, a lossless rollback, a
+maintenance window, and explicit approval for the exact mutation.
 
 The gate tells you **what is at risk, which evidence failed, and what still must
 be proven**. It deliberately does not prescribe how to rewrite every local

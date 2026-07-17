@@ -12,6 +12,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,61 @@ SCRIPT_SPEC = importlib.util.spec_from_file_location("openclaw_safe_update", SCR
 assert SCRIPT_SPEC is not None and SCRIPT_SPEC.loader is not None
 SAFE_UPDATE = importlib.util.module_from_spec(SCRIPT_SPEC)
 SCRIPT_SPEC.loader.exec_module(SAFE_UPDATE)
+
+
+def core_closure(
+    version: str,
+    dependencies: list[tuple[str, str]] | None = None,
+    *,
+    root_integrity: str | None = None,
+    environment: dict[str, str] | None = None,
+    optional_selector: dict[str, list[str]] | None = None,
+    install_script_packages: set[str] | None = None,
+) -> dict[str, object]:
+    packages: dict[str, object] = {
+        "": {
+            "name": "openclaw-safe-update-candidate",
+            "version": "0.0.0",
+            "dependencies": {"openclaw": version},
+        },
+        "node_modules/openclaw": {
+            "version": version,
+            "resolved": f"https://registry.npmjs.org/openclaw/-/openclaw-{version}.tgz",
+            "integrity": root_integrity
+            or "sha512-" + ("a" if version == "1.0.0" else "b") * 64,
+        },
+    }
+    for name, dependency_version in dependencies or []:
+        path = f"node_modules/{name}"
+        entry: dict[str, object] = {
+            "version": dependency_version,
+            "resolved": (
+                f"https://registry.npmjs.org/{name}/-/"
+                f"{name.rsplit('/', 1)[-1]}-{dependency_version}.tgz"
+            ),
+            "integrity": "sha512-" + hashlib.sha256(
+                f"{name}@{dependency_version}".encode()
+            ).hexdigest(),
+        }
+        if optional_selector and name in optional_selector:
+            entry["optional"] = True
+            entry["os"] = optional_selector[name]
+        if install_script_packages and name in install_script_packages:
+            entry["hasInstallScript"] = True
+        packages[path] = entry
+    return SAFE_UPDATE.build_core_closure(
+        {"lockfileVersion": 3, "packages": packages},
+        "openclaw",
+        version,
+        environment
+        or {
+            "node_version": "22.14.0",
+            "npm_version": "11.4.2",
+            "os": "linux",
+            "arch": "x64",
+            "libc": "glibc",
+        },
+    )
 
 
 def write_archive(
@@ -125,6 +181,19 @@ class SafeUpdateTest(unittest.TestCase):
                     },
                 }
             ],
+            "core_candidate": {
+                "package": "openclaw",
+                "current": core_closure(
+                    "1.0.0",
+                    [("@example/message-codec", "3.4.2")],
+                    root_integrity=integrity(self.current_archive),
+                ),
+                "target": core_closure(
+                    "1.1.0",
+                    [("@example/message-codec", "3.4.2")],
+                    root_integrity=integrity(self.target_archive),
+                ),
+            },
         }
         (self.input / "input-metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
         self.customizations = self.root / "customizations.json"
@@ -157,7 +226,12 @@ class SafeUpdateTest(unittest.TestCase):
                 {
                     "schema": "openclaw.safe_update.coverage.v1",
                     "install_shape": "npm_global_linux",
-                    "runtime": {"node_version": "22.14.0"},
+                    "runtime": {
+                        "node_version": "22.14.0",
+                        "os": "linux",
+                        "arch": "x64",
+                        "libc": "glibc",
+                    },
                     "surfaces": [
                         {
                             "id": "signal",
@@ -214,6 +288,7 @@ class SafeUpdateTest(unittest.TestCase):
         synthetic = json.loads((output / "synthetic-update.json").read_text())
         coverage = json.loads((output / "coverage-report.json").read_text())
         postchecks = json.loads((output / "post-upgrade-e2e.json").read_text())
+        candidate_lock = json.loads((output / "core-candidate-lock.json").read_text())
         self.assertEqual(verdict["schema"], "openclaw.safe_update.status.v2")
         self.assertEqual(verdict["phase"], "preflight")
         self.assertEqual(verdict["post_activation_e2e"], "not_run")
@@ -225,6 +300,9 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertEqual(evidence["repair_class"], "openclaw_upgrade")
         self.assertTrue(all(item["status"] == "success" for item in evidence["evidence"]))
         self.assertEqual(coverage["status"], "success")
+        self.assertEqual(candidate_lock["status"], "success")
+        self.assertTrue(candidate_lock["current_root"].startswith("sha256:"))
+        self.assertTrue(candidate_lock["target_root"].startswith("sha256:"))
         self.assertEqual(len(postchecks["surfaces"]), 2)
         self.assertTrue((output / "operator-plan.md").is_file())
         self.assertIn("STOP BEFORE APPLY", (output / "operator-plan.md").read_text())
@@ -233,9 +311,244 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertIn("package/removed.js", diff["removed"]["members"])
         self.assertFalse((output / "upgrade-status.json").exists())
 
+    def test_transitive_resolution_drift_changes_candidate_root(self) -> None:
+        metadata_path = self.input / "input-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["core_candidate"]["target"] = core_closure(
+            "1.1.0",
+            [("@example/message-codec", "3.5.0")],
+            root_integrity=integrity(self.target_archive),
+        )
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        result = self.run_simulation("--customizations", str(self.customizations))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        candidate_lock = json.loads(
+            (self.root / "output" / "core-candidate-lock.json").read_text()
+        )
+        self.assertNotEqual(candidate_lock["current_root"], candidate_lock["target_root"])
+        codec = next(
+            item
+            for item in candidate_lock["changed_packages"]
+            if item["name"] == "@example/message-codec"
+        )
+        self.assertEqual(codec["current_version"], "3.4.2")
+        self.assertEqual(codec["target_version"], "3.5.0")
+
+    def test_candidate_root_is_stable_across_lockfile_order(self) -> None:
+        first = core_closure(
+            "1.1.0",
+            [("alpha", "1.0.0"), ("beta", "2.0.0")],
+        )
+        second = core_closure(
+            "1.1.0",
+            [("beta", "2.0.0"), ("alpha", "1.0.0")],
+        )
+        self.assertEqual(first["root"], second["root"])
+        self.assertEqual(first["packages"], second["packages"])
+
+    def test_optional_platform_selection_is_bound_into_candidate_root(self) -> None:
+        linux = core_closure(
+            "1.1.0",
+            [("native-helper", "1.0.0")],
+            optional_selector={"native-helper": ["linux"]},
+        )
+        darwin = core_closure(
+            "1.1.0",
+            [("native-helper", "1.0.0")],
+            environment={
+                "node_version": "22.14.0",
+                "npm_version": "11.4.2",
+                "os": "darwin",
+                "arch": "x64",
+                "libc": "unknown",
+            },
+            optional_selector={"native-helper": ["linux"]},
+        )
+        self.assertNotEqual(linux["root"], darwin["root"])
+        self.assertTrue(
+            next(item for item in linux["packages"] if item["name"] == "native-helper")[
+                "selected_for_platform"
+            ]
+        )
+        self.assertFalse(
+            next(item for item in darwin["packages"] if item["name"] == "native-helper")[
+                "selected_for_platform"
+            ]
+        )
+
+    def test_missing_or_environment_mismatched_candidate_lock_blocks(self) -> None:
+        metadata_path = self.input / "input-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata.pop("core_candidate")
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        missing = self.run_simulation("--customizations", str(self.customizations))
+        self.assertEqual(missing.returncode, 2)
+
+        metadata["core_candidate"] = {
+            "package": "openclaw",
+            "current": core_closure("1.0.0"),
+            "target": core_closure(
+                "1.1.0",
+                environment={
+                    "node_version": "22.14.0",
+                    "npm_version": "11.4.2",
+                    "os": "darwin",
+                    "arch": "arm64",
+                    "libc": "unknown",
+                },
+            ),
+        }
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        mismatched = self.run_simulation("--customizations", str(self.customizations))
+        self.assertEqual(mismatched.returncode, 2)
+        candidate_lock = json.loads(
+            (self.root / "output" / "core-candidate-lock.json").read_text()
+        )
+        self.assertIn("different environments", candidate_lock["errors"][0])
+
+    def test_candidate_platform_must_match_declared_runtime(self) -> None:
+        value = json.loads(self.coverage.read_text())
+        value["runtime"].update({"os": "darwin", "arch": "arm64", "libc": "none"})
+        self.coverage.write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_simulation("--customizations", str(self.customizations))
+        self.assertEqual(result.returncode, 2)
+        candidate_lock = json.loads(
+            (self.root / "output" / "core-candidate-lock.json").read_text()
+        )
+        self.assertIn("declared runtime platform", candidate_lock["errors"][0])
+
+    def test_candidate_closure_is_bound_to_top_level_package_integrity(self) -> None:
+        metadata_path = self.input / "input-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["core_candidate"]["target"] = core_closure(
+            "1.1.0",
+            root_integrity="sha512-" + "c" * 64,
+        )
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        result = self.run_simulation("--customizations", str(self.customizations))
+        self.assertEqual(result.returncode, 2)
+        candidate_lock = json.loads(
+            (self.root / "output" / "core-candidate-lock.json").read_text()
+        )
+        self.assertIn("does not match package evidence", candidate_lock["errors"][0])
+
+    def test_candidate_rejects_links_and_new_transitive_install_scripts(self) -> None:
+        linked_lock = {
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"dependencies": {"openclaw": "1.1.0"}},
+                "node_modules/openclaw": {
+                    "version": "1.1.0",
+                    "resolved": "https://registry.npmjs.org/openclaw/-/openclaw-1.1.0.tgz",
+                    "integrity": "sha512-" + "a" * 64,
+                },
+                "node_modules/local-helper": {
+                    "version": "1.0.0",
+                    "resolved": "https://registry.npmjs.org/local-helper/-/local-helper-1.0.0.tgz",
+                    "integrity": "sha512-" + "b" * 64,
+                    "link": "../local-helper",
+                },
+            },
+        }
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "mutable link"):
+            SAFE_UPDATE.build_core_closure(
+                linked_lock,
+                "openclaw",
+                "1.1.0",
+                {
+                    "node_version": "22.14.0",
+                    "npm_version": "11.4.2",
+                    "os": "linux",
+                    "arch": "x64",
+                    "libc": "glibc",
+                },
+            )
+
+        metadata_path = self.input / "input-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["core_candidate"]["target"] = core_closure(
+            "1.1.0",
+            [("native-helper", "1.0.0")],
+            root_integrity=integrity(self.target_archive),
+            install_script_packages={"native-helper"},
+        )
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        result = self.run_simulation("--customizations", str(self.customizations))
+        self.assertEqual(result.returncode, 2)
+        candidate_lock = json.loads(
+            (self.root / "output" / "core-candidate-lock.json").read_text()
+        )
+        self.assertIn("transitive install script", candidate_lock["errors"][0])
+
+    def test_core_resolver_invocation_is_lock_only_and_ignores_scripts(self) -> None:
+        environment = {
+            "node_version": "22.14.0",
+            "npm_version": "11.4.2",
+            "os": "linux",
+            "arch": "x64",
+            "libc": "glibc",
+        }
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            arguments: list[str],
+            cache_dir: Path,
+            working_dir: Path | None = None,
+            environment_overrides: dict[str, str] | None = None,
+        ) -> dict[str, object]:
+            captured.update(
+                {
+                    "arguments": arguments,
+                    "working_dir": working_dir,
+                    "environment_overrides": environment_overrides,
+                }
+            )
+            assert working_dir is not None
+            lock = {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"dependencies": {"openclaw": "1.1.0"}},
+                    "node_modules/openclaw": {
+                        "version": "1.1.0",
+                        "resolved": "https://registry.npmjs.org/openclaw/-/openclaw-1.1.0.tgz",
+                        "integrity": "sha512-" + "a" * 64,
+                    },
+                },
+            }
+            (working_dir / "package-lock.json").write_text(
+                json.dumps(lock), encoding="utf-8"
+            )
+            return {}
+
+        with tempfile.TemporaryDirectory() as cache, patch.object(
+            SAFE_UPDATE, "run_npm_json", side_effect=fake_run
+        ):
+            closure = SAFE_UPDATE.resolve_core_closure(
+                "openclaw",
+                "1.1.0",
+                Path(cache),
+                environment,
+            )
+
+        self.assertIn("--package-lock-only", captured["arguments"])
+        self.assertIn("--ignore-scripts", captured["arguments"])
+        self.assertIn("--include=optional", captured["arguments"])
+        self.assertEqual(
+            captured["environment_overrides"],
+            {
+                "NPM_CONFIG_OS": "linux",
+                "NPM_CONFIG_CPU": "x64",
+                "NPM_CONFIG_LIBC": "glibc",
+            },
+        )
+        self.assertEqual(closure["resolver"]["ignore_scripts"], True)
+
     def test_status_decision_is_stable_across_volatile_run_envelopes(self) -> None:
         evidence_status = {
             "runtime_truth": "success",
+            "core_candidate_lock": "success",
             "synthetic_update": "success",
             "customization_compatibility": "success",
             "installation_coverage": "success",
