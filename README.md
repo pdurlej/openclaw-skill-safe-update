@@ -146,6 +146,7 @@ python3 scripts/openclaw_safe_update.py simulate \
   --coverage assets/coverage.example.json \
   --installation-contract artifacts/installation-contract.json \
   --installation-attestation artifacts/installation-attestation.json \
+  --conservative-inputs artifacts/conservative-inputs.json \
   --output-dir artifacts/safe-update
 ```
 
@@ -157,7 +158,11 @@ service, persona, attachment, and voice surface you need to preserve.
 The first simulation is expected to block while still producing the composed
 candidate lock. `attest` then compares an explicit local observation spec with
 that current root. The second simulation can become
-`ready_for_operator_plan` only while the attestation is fresh and complete.
+`ready_for_operator_plan` only while the attestation is fresh and complete and
+`conservative-inputs.json` contains a SHA-256 reference to verified rollback
+evidence. Start from
+[`examples/conservative-inputs.example.json`](examples/conservative-inputs.example.json)
+and replace the placeholder digest with the digest of the real evidence.
 Paths from the observation spec are never emitted. Configuration and
 personalization files use `identity_only`, so their contents are never opened;
 content hashing is restricted to declared package, add-on, sidecar, and
@@ -179,6 +184,7 @@ protection this project exists to provide.
 | `installation-contract.json` | Capability/component graph translated from the v1.1 declarations |
 | `installation-candidate-lock.json` | One canonical current and target root binding core, declared add-ons, sidecars, configuration/personalization identities, contracts, environment, analyzer, and composition policy |
 | `installation-attestation.json` | Fresh public-safe comparison of observed local components and service config pointers with the composed current root |
+| `conservative-gates.json` | Lossless deterministic classification of unknown, migration, rollback, environment, protocol, and contract risk |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
 | `coverage-report.json` | Whether every required installation surface is represented and bound to evidence |
@@ -190,7 +196,10 @@ protection this project exists to provide.
 
 `ready_for_operator_plan` means the exact package archives, resolved OpenClaw
 core closure, composed installation candidate, local installation attestation,
-customization, runtime, and declared installation-coverage evidence passed. The closure resolver uses an
+deterministic conservative gates, customization, runtime, and declared
+installation-coverage evidence passed. Unknown or lossy authority inputs block;
+resolved closure drift is always conservative, never Fast; and operator input
+can only add caution or satisfy a named hash-bound evidence gate. The closure resolver uses an
 isolated npm configuration, never runs lifecycle scripts, and binds exact
 transitive, peer, optional, and platform-selected packages into the candidate
 root. Separately distributed artifacts must use an exact version and SHA-256;

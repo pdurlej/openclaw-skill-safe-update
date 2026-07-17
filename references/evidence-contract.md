@@ -12,6 +12,7 @@ The safe-update rehearsal is a read-only package compatibility check. It does no
 - An installation coverage profile declaring the runtime Node version, required surfaces, their customization evidence, and concrete post-upgrade checks.
 - An installation contract declaring every capability, component, contract, dependency edge, and separately distributed artifact identity.
 - A fresh local installation attestation bound to the current composed candidate root.
+- Conservative inputs containing only hash-bound named gate evidence and optional operator escalations. They cannot waive machine findings or set a verdict.
 
 ## Outputs
 
@@ -45,6 +46,14 @@ opening their contents. Content hashing is permitted only for declared
 package, add-on, sidecar, and external-asset files. Missing observations,
 unexplained residue, undeclared service config pointers, an expired artifact,
 or a candidate-root mismatch fail closed.
+
+`conservative-gates.json` applies a stable deterministic policy to the complete,
+unbounded authority diff. Unknown closure, stale/incomplete attestation,
+lossy input, and unknown optional/native selection block directly. Migration,
+lifecycle/download, rollback, environment, SDK, service, permission, protocol,
+and channel-crypto changes require named hash-bound evidence. Resolved closure
+drift is always conservative. Human-facing member lists may be truncated, but
+they never authorize this decision.
 
 `synthetic-update.json` records archive safety, package identity, bounded added, removed, and changed member lists, plus current-to-target changes in Node engines, dependencies, optional and peer dependencies, lifecycle scripts, and executable declarations. Changed lifecycle scripts and incompatible or unproven Node requirements block the rehearsal.
 

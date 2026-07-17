@@ -36,6 +36,11 @@ on:
         required: true
         default: .openclaw-safe-update/installation-attestation.json
         type: string
+      conservative-inputs-file:
+        description: Hash-bound rollback and deterministic gate evidence
+        required: true
+        default: .openclaw-safe-update/conservative-inputs.json
+        type: string
   workflow_call:
     inputs:
       current-version:
@@ -64,6 +69,10 @@ on:
         required: false
         default: .openclaw-safe-update/installation-attestation.json
         type: string
+      conservative-inputs-file:
+        required: false
+        default: .openclaw-safe-update/conservative-inputs.json
+        type: string
 
 permissions:
   contents: read
@@ -80,6 +89,7 @@ jobs:
       REQUIRE_CUSTOMIZATIONS: ${{ inputs['require-customizations'] }}
       COVERAGE_FILE: ${{ inputs['coverage-file'] }}
       INSTALLATION_ATTESTATION_FILE: ${{ inputs['installation-attestation-file'] }}
+      CONSERVATIVE_INPUTS_FILE: ${{ inputs['conservative-inputs-file'] }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -117,6 +127,9 @@ jobs:
           if [[ -f "$INSTALLATION_ATTESTATION_FILE" ]]; then
             arguments+=(--installation-attestation "$INSTALLATION_ATTESTATION_FILE")
           fi
+          if [[ -f "$CONSERVATIVE_INPUTS_FILE" ]]; then
+            arguments+=(--conservative-inputs "$CONSERVATIVE_INPUTS_FILE")
+          fi
           if [[ -f "$CUSTOMIZATIONS_FILE" ]]; then
             arguments+=(--customizations "$CUSTOMIZATIONS_FILE")
           elif [[ "$REQUIRE_CUSTOMIZATIONS" != "true" ]]; then
@@ -135,6 +148,7 @@ jobs:
             artifacts/safe-update/core-candidate-lock.json
             artifacts/safe-update/installation-candidate-lock.json
             artifacts/safe-update/installation-attestation.json
+            artifacts/safe-update/conservative-gates.json
             artifacts/safe-update/synthetic-update.json
             artifacts/safe-update/customization-compatibility.json
             artifacts/safe-update/coverage-report.json

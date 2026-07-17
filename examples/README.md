@@ -27,3 +27,8 @@ Until an approved update has happened, the post-upgrade E2E checks remain
 `local-installation.observation.json` is a path-bearing local input template.
 Replace every placeholder on the machine being attested. Its paths are never
 copied to the public-safe attestation output.
+
+`conservative-inputs.example.json` is a non-authoritative input template.
+Replace its zero rollback digest with the SHA-256 digest of verified rollback
+evidence. Add only stable named gates required by `conservative-gates.json`;
+this input cannot waive machine findings or set a verdict.
