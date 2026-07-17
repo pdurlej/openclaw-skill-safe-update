@@ -26,10 +26,22 @@ Every JSON output includes `effect: read_only_openclaw_update_rehearsal`, `runti
 
 `evidence-bundle.json` binds the evidence artifacts by SHA-256. A downstream gate may translate this bundle to its own schema, but must preserve failures and the no-approval state.
 
-`verdict.json` has only two valid outcomes:
+`verdict.json` is the single authoritative preflight status using schema
+`openclaw.safe_update.status.v2`. It has only two valid outcomes:
 
 - `blocked`: required evidence or compatibility checks failed.
 - `ready_for_operator_plan`: package-level evidence passed; prepare a rollback-aware plan and request separate approval for any live mutation.
+
+Its timestamp-free `decision_content` is bound by `decision_digest`. Volatile
+run metadata, evidence paths and hashes, and operator-facing prose do not affect
+that digest. The status is always `phase: preflight`,
+`post_activation_e2e: not_run`, `production_apply_allowed: false`, and
+`operator_approval: false`.
+
+The embedded, non-authoritative `compatibility_view` preserves the previous
+`openclaw.safe_update.verdict.v1` payload for v1.1 consumers. It is derived from
+the v2 status and cannot override it. There is no parallel
+`upgrade-status.json`.
 
 `summary.md` is a human-readable view and is not authoritative over the JSON artifacts.
 

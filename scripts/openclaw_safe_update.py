@@ -23,6 +23,54 @@ EFFECT = "read_only_openclaw_update_rehearsal"
 INPUT_SCHEMA = "openclaw.safe_update.input.v1"
 CUSTOMIZATIONS_SCHEMA = "openclaw.safe_update.customizations.v1"
 COVERAGE_SCHEMA = "openclaw.safe_update.coverage.v1"
+STATUS_SCHEMA = "openclaw.safe_update.status.v2"
+DECISION_SCHEMA = "openclaw.safe_update.decision.v1"
+LEGACY_VERDICT_SCHEMA = "openclaw.safe_update.verdict.v1"
+STATUS_FIELDS = frozenset(
+    {
+        "schema",
+        "generated_at",
+        "effect",
+        "runtime_effect",
+        "external_effect",
+        "external_write_effect",
+        "production_apply_allowed",
+        "operator_approval",
+        "phase",
+        "post_activation_e2e",
+        "verdict",
+        "reason",
+        "evidence_bundle",
+        "next_step",
+        "decision_content",
+        "decision_digest",
+        "run_envelope",
+        "compatibility_view",
+    }
+)
+DECISION_FIELDS = frozenset(
+    {
+        "schema",
+        "phase",
+        "verdict",
+        "reason_code",
+        "evidence_status",
+        "production_apply_allowed",
+        "operator_approval",
+        "post_activation_e2e",
+        "next_step_code",
+    }
+)
+EVIDENCE_STATUS_FIELDS = frozenset(
+    {
+        "runtime_truth",
+        "synthetic_update",
+        "customization_compatibility",
+        "installation_coverage",
+        "post_upgrade_e2e_plan",
+    }
+)
+EVIDENCE_BUNDLE_FIELDS = frozenset({"path", "sha256"})
 PACKAGE_RE = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 MAX_TEXT_MEMBER_BYTES = 4 * 1024 * 1024
@@ -70,6 +118,189 @@ def safety_fields() -> dict[str, Any]:
         "production_apply_allowed": False,
         "operator_approval": False,
     }
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def canonical_digest(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def legacy_verdict_payload(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": LEGACY_VERDICT_SCHEMA,
+        "generated_at": status["generated_at"],
+        **safety_fields(),
+        "verdict": status["verdict"],
+        "reason": status["reason"],
+        "evidence_bundle": status["evidence_bundle"],
+        "next_step": status["next_step"],
+    }
+
+
+def build_status(
+    *,
+    generated_at: str,
+    verdict: str,
+    reason: str,
+    reason_code: str,
+    evidence_status: dict[str, str],
+    evidence_bundle: dict[str, str],
+    next_step: str,
+    next_step_code: str,
+) -> dict[str, Any]:
+    decision_content = {
+        "schema": DECISION_SCHEMA,
+        "phase": "preflight",
+        "verdict": verdict,
+        "reason_code": reason_code,
+        "evidence_status": evidence_status,
+        "production_apply_allowed": False,
+        "operator_approval": False,
+        "post_activation_e2e": "not_run",
+        "next_step_code": next_step_code,
+    }
+    status = {
+        "schema": STATUS_SCHEMA,
+        "generated_at": generated_at,
+        **safety_fields(),
+        "phase": "preflight",
+        "post_activation_e2e": "not_run",
+        "verdict": verdict,
+        "reason": reason,
+        "evidence_bundle": evidence_bundle,
+        "next_step": next_step,
+        "decision_content": decision_content,
+        "decision_digest": canonical_digest(decision_content),
+        "run_envelope": {
+            "generated_at": generated_at,
+            "evidence_bundle": evidence_bundle,
+        },
+    }
+    status["compatibility_view"] = {
+        "schema": "openclaw.safe_update.compatibility_view.v1",
+        "authoritative": False,
+        "payload": legacy_verdict_payload(status),
+    }
+    return status
+
+
+def parse_status(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RehearsalError("status must be a JSON object")
+    if value.get("schema") != STATUS_SCHEMA:
+        raise RehearsalError(f"status schema must be {STATUS_SCHEMA}")
+    if set(value) != STATUS_FIELDS:
+        raise RehearsalError("status contains unknown or missing fields")
+
+    hard_invariants = {
+        "effect": EFFECT,
+        "runtime_effect": "none",
+        "external_effect": "npm_registry_read_only",
+        "external_write_effect": "none",
+        "production_apply_allowed": False,
+        "operator_approval": False,
+        "phase": "preflight",
+        "post_activation_e2e": "not_run",
+    }
+    for field, expected in hard_invariants.items():
+        if value.get(field) != expected:
+            raise RehearsalError(f"status invariant {field} must be {expected!r}")
+
+    if not isinstance(value.get("generated_at"), str) or not value["generated_at"]:
+        raise RehearsalError("status generated_at must be a non-empty string")
+    if value.get("verdict") not in {"blocked", "ready_for_operator_plan"}:
+        raise RehearsalError("status verdict is invalid")
+    if not isinstance(value.get("reason"), str) or not value["reason"]:
+        raise RehearsalError("status reason must be a non-empty string")
+    if not isinstance(value.get("next_step"), str) or not value["next_step"]:
+        raise RehearsalError("status next_step must be a non-empty string")
+    bundle = value.get("evidence_bundle")
+    if (
+        not isinstance(bundle, dict)
+        or set(bundle) != EVIDENCE_BUNDLE_FIELDS
+        or not isinstance(bundle.get("path"), str)
+        or not bundle["path"]
+        or not re.fullmatch(r"[0-9a-f]{64}", str(bundle.get("sha256", "")))
+    ):
+        raise RehearsalError("status evidence_bundle is invalid")
+    decision = value.get("decision_content")
+    if not isinstance(decision, dict) or decision.get("schema") != DECISION_SCHEMA:
+        raise RehearsalError(f"decision_content schema must be {DECISION_SCHEMA}")
+    if set(decision) != DECISION_FIELDS:
+        raise RehearsalError("decision_content contains unknown or missing fields")
+    if value.get("decision_digest") != canonical_digest(decision):
+        raise RehearsalError("decision_digest does not match decision_content")
+    for field in (
+        "phase",
+        "verdict",
+        "production_apply_allowed",
+        "operator_approval",
+        "post_activation_e2e",
+    ):
+        if decision.get(field) != value.get(field):
+            raise RehearsalError(f"decision_content {field} does not match status")
+    if not isinstance(decision.get("evidence_status"), dict):
+        raise RehearsalError("decision_content evidence_status must be an object")
+    if set(decision["evidence_status"]) != EVIDENCE_STATUS_FIELDS:
+        raise RehearsalError(
+            "decision_content evidence_status contains unknown or missing fields"
+        )
+    evidence_values = set(decision["evidence_status"].values())
+    if not evidence_values or not evidence_values <= {"success", "failed"}:
+        raise RehearsalError("decision_content evidence_status is invalid")
+    expected_reason_code = (
+        "required_evidence_failed"
+        if value["verdict"] == "blocked"
+        else "baseline_rehearsal_passed"
+    )
+    expected_next_step_code = (
+        "repair_and_rerun"
+        if value["verdict"] == "blocked"
+        else "prepare_operator_plan"
+    )
+    if decision.get("reason_code") != expected_reason_code:
+        raise RehearsalError("decision_content reason_code does not match verdict")
+    if decision.get("next_step_code") != expected_next_step_code:
+        raise RehearsalError("decision_content next_step_code does not match verdict")
+    if value["verdict"] == "blocked" and "failed" not in evidence_values:
+        raise RehearsalError("blocked status must contain failed evidence")
+    if value["verdict"] == "ready_for_operator_plan" and evidence_values != {"success"}:
+        raise RehearsalError("ready status requires all evidence to succeed")
+
+    envelope = value.get("run_envelope")
+    if not isinstance(envelope, dict):
+        raise RehearsalError("run_envelope must be an object")
+    if set(envelope) != {"generated_at", "evidence_bundle"}:
+        raise RehearsalError("run_envelope contains unknown or missing fields")
+    if envelope.get("generated_at") != value.get("generated_at"):
+        raise RehearsalError("run_envelope generated_at does not match status")
+    if envelope.get("evidence_bundle") != value.get("evidence_bundle"):
+        raise RehearsalError("run_envelope evidence_bundle does not match status")
+
+    compatibility = value.get("compatibility_view")
+    if not isinstance(compatibility, dict):
+        raise RehearsalError("compatibility_view must be an object")
+    if set(compatibility) != {"schema", "authoritative", "payload"}:
+        raise RehearsalError("compatibility_view contains unknown or missing fields")
+    if compatibility.get("schema") != "openclaw.safe_update.compatibility_view.v1":
+        raise RehearsalError("compatibility_view schema is invalid")
+    if compatibility.get("authoritative") is not False:
+        raise RehearsalError("compatibility_view must be non-authoritative")
+    if compatibility.get("payload") != legacy_verdict_payload(value):
+        raise RehearsalError("compatibility_view payload does not match status")
+    return value
+
+
+def write_status(path: Path, value: dict[str, Any]) -> None:
+    write_json(path, parse_status(value))
 
 
 def read_json(path: Path) -> Any:
@@ -926,24 +1157,32 @@ def simulate(args: argparse.Namespace) -> int:
     }
     evidence_path = output_dir / "evidence-bundle.json"
     write_json(evidence_path, evidence)
-    verdict = {
-        "schema": "openclaw.safe_update.verdict.v1",
-        **common,
-        "verdict": verdict_value,
-        "reason": (
+    verdict = build_status(
+        generated_at=generated_at,
+        verdict=verdict_value,
+        reason=(
             "required package, customization, runtime, or installation coverage evidence failed"
             if blocked
             else "package-level rehearsal passed; live mutation still requires an operator plan and approval"
         ),
-        "evidence_bundle": {"path": evidence_path.name, "sha256": digest_file(evidence_path)},
-        "next_step": (
+        reason_code="required_evidence_failed" if blocked else "baseline_rehearsal_passed",
+        evidence_status={
+            "runtime_truth": runtime_status,
+            "synthetic_update": synthetic_status,
+            "customization_compatibility": customization_status,
+            "installation_coverage": coverage_status,
+            "post_upgrade_e2e_plan": postcheck_plan["status"],
+        },
+        evidence_bundle={"path": evidence_path.name, "sha256": digest_file(evidence_path)},
+        next_step=(
             "repair evidence and rerun"
             if blocked
             else "prepare rollback-aware operator plan and stop before apply"
         ),
-    }
+        next_step_code="repair_and_rerun" if blocked else "prepare_operator_plan",
+    )
     verdict_path = output_dir / "verdict.json"
-    write_json(verdict_path, verdict)
+    write_status(verdict_path, verdict)
     operator_plan = (
         "# OpenClaw Upgrade Operator Plan\n\n"
         "## STOP BEFORE APPLY\n\n"

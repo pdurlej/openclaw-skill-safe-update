@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
+import importlib.util
 import io
 import json
 from pathlib import Path
@@ -21,6 +23,29 @@ LICENSE = ROOT / "LICENSE"
 UPGRADE_ISSUE_TEMPLATE = ROOT / ".github" / "ISSUE_TEMPLATE" / "upgrade-experience.yml"
 HERO = ROOT / "assets" / "brand" / "openclaw-safe-upgrade-hero.png"
 CLAWHUB_IGNORE = ROOT / ".clawhubignore"
+STATUS_SCHEMA = ROOT / "schemas" / "openclaw.safe_update.status.v2.schema.json"
+BASELINE = ROOT / "references" / "v1.1-baseline.json"
+BASELINE_SHA = "58f98a3c6a6448fb7e54124c030a18a47e1f7d1c"
+BASELINE_TEST_CASES = [
+    "test_archive_filename_traversal_blocks",
+    "test_coverage_rejects_required_surface_without_postcheck",
+    "test_fetch_pins_public_npm_registry",
+    "test_fetch_rejects_version_ranges",
+    "test_green_rehearsal_produces_hash_bound_evidence",
+    "test_incompatible_runtime_node_blocks",
+    "test_integrity_mismatch_blocks",
+    "test_inventory_writes_public_safe_draft_profiles",
+    "test_lifecycle_script_change_blocks",
+    "test_missing_coverage_profile_blocks",
+    "test_missing_customization_manifest_blocks_and_keeps_artifacts",
+    "test_public_product_surface_preserves_rehearsal_boundary",
+    "test_workflow_has_no_apply_or_external_write_surface",
+]
+
+SCRIPT_SPEC = importlib.util.spec_from_file_location("openclaw_safe_update", SCRIPT)
+assert SCRIPT_SPEC is not None and SCRIPT_SPEC.loader is not None
+SAFE_UPDATE = importlib.util.module_from_spec(SCRIPT_SPEC)
+SCRIPT_SPEC.loader.exec_module(SAFE_UPDATE)
 
 
 def write_archive(
@@ -188,6 +213,9 @@ class SafeUpdateTest(unittest.TestCase):
         synthetic = json.loads((output / "synthetic-update.json").read_text())
         coverage = json.loads((output / "coverage-report.json").read_text())
         postchecks = json.loads((output / "post-upgrade-e2e.json").read_text())
+        self.assertEqual(verdict["schema"], "openclaw.safe_update.status.v2")
+        self.assertEqual(verdict["phase"], "preflight")
+        self.assertEqual(verdict["post_activation_e2e"], "not_run")
         self.assertEqual(verdict["verdict"], "ready_for_operator_plan")
         self.assertFalse(verdict["production_apply_allowed"])
         self.assertFalse(verdict["operator_approval"])
@@ -202,6 +230,172 @@ class SafeUpdateTest(unittest.TestCase):
         diff = synthetic["packages"][0]["diff"]
         self.assertIn("package/added.js", diff["added"]["members"])
         self.assertIn("package/removed.js", diff["removed"]["members"])
+        self.assertFalse((output / "upgrade-status.json").exists())
+
+    def test_status_decision_is_stable_across_volatile_run_envelopes(self) -> None:
+        evidence_status = {
+            "runtime_truth": "success",
+            "synthetic_update": "success",
+            "customization_compatibility": "success",
+            "installation_coverage": "success",
+            "post_upgrade_e2e_plan": "success",
+        }
+        first = SAFE_UPDATE.build_status(
+            generated_at="2026-07-17T10:00:00+00:00",
+            verdict="ready_for_operator_plan",
+            reason="first advisory wording",
+            reason_code="baseline_rehearsal_passed",
+            evidence_status=evidence_status,
+            evidence_bundle={"path": "evidence-bundle.json", "sha256": "1" * 64},
+            next_step="first operator wording",
+            next_step_code="prepare_operator_plan",
+        )
+        second = SAFE_UPDATE.build_status(
+            generated_at="2026-07-18T11:12:13+00:00",
+            verdict="ready_for_operator_plan",
+            reason="different advisory wording",
+            reason_code="baseline_rehearsal_passed",
+            evidence_status=evidence_status,
+            evidence_bundle={"path": "evidence-bundle.json", "sha256": "2" * 64},
+            next_step="different operator wording",
+            next_step_code="prepare_operator_plan",
+        )
+
+        self.assertEqual(first["decision_content"], second["decision_content"])
+        self.assertEqual(first["decision_digest"], second["decision_digest"])
+        self.assertNotEqual(first["run_envelope"], second["run_envelope"])
+        self.assertEqual(SAFE_UPDATE.parse_status(first), first)
+        self.assertEqual(SAFE_UPDATE.parse_status(second), second)
+
+    def test_status_parser_rejects_tampering_and_true_mutation_fields(self) -> None:
+        result = self.run_simulation("--customizations", str(self.customizations))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        status = json.loads((self.root / "output" / "verdict.json").read_text())
+
+        unknown_root = copy.deepcopy(status)
+        unknown_root["shadow_verdict"] = "ready_for_operator_plan"
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "status contains"):
+            SAFE_UPDATE.parse_status(unknown_root)
+
+        extended_bundle = copy.deepcopy(status)
+        extended_bundle["evidence_bundle"]["shadow"] = "ignored"
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "evidence_bundle"):
+            SAFE_UPDATE.parse_status(extended_bundle)
+
+        tampered = copy.deepcopy(status)
+        tampered["decision_content"]["verdict"] = "blocked"
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "decision_digest"):
+            SAFE_UPDATE.parse_status(tampered)
+
+        for field in ("production_apply_allowed", "operator_approval"):
+            unsafe = copy.deepcopy(status)
+            unsafe[field] = True
+            with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, field):
+                SAFE_UPDATE.parse_status(unsafe)
+
+        activated = copy.deepcopy(status)
+        activated["post_activation_e2e"] = "passed"
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "post_activation_e2e"):
+            SAFE_UPDATE.parse_status(activated)
+
+        volatile_decision = copy.deepcopy(status)
+        volatile_decision["decision_content"]["generated_at"] = status["generated_at"]
+        volatile_decision["decision_digest"] = SAFE_UPDATE.canonical_digest(
+            volatile_decision["decision_content"]
+        )
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "unknown or missing"):
+            SAFE_UPDATE.parse_status(volatile_decision)
+
+        contradictory = copy.deepcopy(status)
+        contradictory["decision_content"]["reason_code"] = "required_evidence_failed"
+        contradictory["decision_digest"] = SAFE_UPDATE.canonical_digest(
+            contradictory["decision_content"]
+        )
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "reason_code"):
+            SAFE_UPDATE.parse_status(contradictory)
+
+        for evidence_mutation in ("missing", "unknown"):
+            malformed_evidence = copy.deepcopy(status)
+            if evidence_mutation == "missing":
+                malformed_evidence["decision_content"]["evidence_status"].pop(
+                    "runtime_truth"
+                )
+            else:
+                malformed_evidence["decision_content"]["evidence_status"][
+                    "shadow"
+                ] = "success"
+            malformed_evidence["decision_digest"] = SAFE_UPDATE.canonical_digest(
+                malformed_evidence["decision_content"]
+            )
+            with self.assertRaisesRegex(
+                SAFE_UPDATE.RehearsalError,
+                "evidence_status contains unknown or missing",
+            ):
+                SAFE_UPDATE.parse_status(malformed_evidence)
+
+    def test_status_parser_rejects_unknown_fields_on_blocked_status(self) -> None:
+        result = self.run_simulation()
+        self.assertEqual(result.returncode, 2)
+        status = json.loads((self.root / "output" / "verdict.json").read_text())
+        self.assertEqual(status["verdict"], "blocked")
+
+        status["shadow_reason"] = "advisory only"
+        with self.assertRaisesRegex(SAFE_UPDATE.RehearsalError, "status contains"):
+            SAFE_UPDATE.parse_status(status)
+
+    def test_status_preserves_the_v1_1_compatibility_view(self) -> None:
+        result = self.run_simulation("--customizations", str(self.customizations))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        status = json.loads((self.root / "output" / "verdict.json").read_text())
+        compatibility = status["compatibility_view"]
+
+        self.assertFalse(compatibility["authoritative"])
+        self.assertEqual(
+            compatibility["schema"],
+            "openclaw.safe_update.compatibility_view.v1",
+        )
+        self.assertEqual(
+            compatibility["payload"],
+            SAFE_UPDATE.legacy_verdict_payload(status),
+        )
+        for field in (
+            "verdict",
+            "reason",
+            "evidence_bundle",
+            "next_step",
+            "production_apply_allowed",
+            "operator_approval",
+        ):
+            self.assertEqual(status[field], compatibility["payload"][field])
+
+    def test_status_schema_and_frozen_baseline_are_pinned(self) -> None:
+        schema = json.loads(STATUS_SCHEMA.read_text())
+        baseline = json.loads(BASELINE.read_text())
+
+        self.assertEqual(
+            schema["properties"]["schema"]["const"],
+            "openclaw.safe_update.status.v2",
+        )
+        self.assertFalse(schema["properties"]["production_apply_allowed"]["const"])
+        self.assertFalse(schema["properties"]["operator_approval"]["const"])
+        self.assertEqual(schema["properties"]["phase"]["const"], "preflight")
+        self.assertEqual(
+            schema["properties"]["post_activation_e2e"]["const"],
+            "not_run",
+        )
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(schema["properties"]), SAFE_UPDATE.STATUS_FIELDS)
+        evidence_status_schema = schema["$defs"]["decisionContent"]["properties"][
+            "evidence_status"
+        ]
+        self.assertFalse(evidence_status_schema["additionalProperties"])
+        self.assertEqual(
+            set(evidence_status_schema["properties"]),
+            SAFE_UPDATE.EVIDENCE_STATUS_FIELDS,
+        )
+        self.assertEqual(baseline["commit"], BASELINE_SHA)
+        self.assertEqual(baseline["test_case_count"], 13)
+        self.assertEqual(baseline["test_cases"], BASELINE_TEST_CASES)
 
     def test_missing_customization_manifest_blocks_and_keeps_artifacts(self) -> None:
         result = self.run_simulation()
