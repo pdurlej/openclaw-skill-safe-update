@@ -79,7 +79,12 @@ Create `.openclaw-safe-update/coverage.json` using `openclaw.safe_update.coverag
 {
   "schema": "openclaw.safe_update.coverage.v1",
   "install_shape": "npm_global_linux",
-  "runtime": {"node_version": "22.14.0"},
+  "runtime": {
+    "node_version": "22.14.0",
+    "os": "linux",
+    "arch": "x64",
+    "libc": "glibc"
+  },
   "surfaces": [
     {
       "id": "signal",
@@ -108,7 +113,7 @@ python3 scripts/openclaw_safe_update.py fetch \
   --output-dir artifacts/input
 ```
 
-`fetch` uses `npm view` and `npm pack`. It records registry integrity metadata and downloads archives without installing or running them.
+`fetch` uses `npm view`, `npm pack`, and an isolated `npm install --package-lock-only --ignore-scripts` resolver. It records registry integrity metadata, downloads archives without installing them, and binds the exact OpenClaw transitive, peer, optional, platform, Node, and npm closure into a candidate root.
 
 ### 5. Run the Synthetic Rehearsal
 
@@ -120,15 +125,16 @@ python3 scripts/openclaw_safe_update.py simulate \
   --output-dir artifacts/safe-update
 ```
 
-The rehearsal safely inspects archives, verifies exact package identity and integrity, compares current and target file trees and package metadata, evaluates customization checks, validates installation coverage, and emits a hash-bound evidence bundle. Incompatible or unproven Node requirements and changed package lifecycle scripts block the rehearsal.
+The rehearsal safely inspects archives, verifies exact package identity and integrity, validates the resolved OpenClaw core candidate, compares current and target file trees and package metadata, evaluates customization checks, validates installation coverage, and emits a hash-bound evidence bundle. Missing or non-reproducible closure data, environment drift, incompatible or unproven Node requirements, and changed package lifecycle scripts block the rehearsal.
 
-For a genuinely vanilla deployment, `--allow-no-customizations --allow-no-coverage --runtime-node-version <exact-version>` may be used only after explicitly confirming that there are no local overlays, patches, wrappers, plugin contracts, or runtime-specific integrations. Do not silently add either flag to automation.
+For a genuinely vanilla deployment, `--allow-no-customizations --allow-no-coverage --runtime-node-version <exact-version> --runtime-os <os> --runtime-arch <arch> --runtime-libc <libc>` may be used only after explicitly confirming that there are no local overlays, patches, wrappers, plugin contracts, or runtime-specific integrations. Do not silently add either flag to automation.
 
 ### 6. Review and Stop
 
 Inspect these artifacts:
 
 - `runtime-truth.json`
+- `core-candidate-lock.json`
 - `synthetic-update.json`
 - `customization-compatibility.json`
 - `coverage-report.json`

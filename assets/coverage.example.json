@@ -2,7 +2,10 @@
   "schema": "openclaw.safe_update.coverage.v1",
   "install_shape": "npm_global_linux",
   "runtime": {
-    "node_version": "22.14.0"
+    "node_version": "22.14.0",
+    "os": "linux",
+    "arch": "x64",
+    "libc": "glibc"
   },
   "surfaces": [
     {
