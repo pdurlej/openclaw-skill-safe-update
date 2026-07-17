@@ -11,11 +11,12 @@ import os
 import platform
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -26,6 +27,8 @@ COVERAGE_SCHEMA = "openclaw.safe_update.coverage.v1"
 CORE_CLOSURE_SCHEMA = "openclaw.safe_update.core_closure.v1"
 CORE_CANDIDATE_LOCK_SCHEMA = "openclaw.safe_update.core_candidate_lock.v1"
 INSTALLATION_CANDIDATE_LOCK_SCHEMA = "openclaw.safe_update.installation_candidate_lock.v1"
+INSTALLATION_ATTESTATION_SCHEMA = "openclaw.safe_update.installation_attestation.v1"
+INSTALLATION_OBSERVATION_SCHEMA = "openclaw.safe_update.installation_observation.v1"
 CORE_CLOSURE_ANALYZER_VERSION = "1.0.0"
 CORE_CLOSURE_POLICY_VERSION = "1"
 INSTALLATION_COMPOSITION_POLICY_VERSION = "1"
@@ -75,6 +78,7 @@ EVIDENCE_STATUS_FIELDS = frozenset(
         "runtime_truth",
         "core_candidate_lock",
         "installation_candidate_lock",
+        "installation_attestation",
         "synthetic_update",
         "customization_compatibility",
         "installation_coverage",
@@ -114,6 +118,30 @@ PACKAGE_METADATA_FIELDS = (
     "bin",
 )
 LIFECYCLE_SCRIPTS = {"preinstall", "install", "postinstall", "prepack", "prepare"}
+ATTESTATION_CONTENT_KINDS = {
+    "plugin_package",
+    "sidecar",
+    "addon",
+    "external_asset",
+}
+ATTESTATION_IDENTITY_KINDS = {
+    "configuration_identity",
+    "personalization_contract",
+}
+SAFE_OBSERVATION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+SERVICE_POINTER_RE = re.compile(
+    r"(?:--config(?:=|\s+)|OPENCLAW_CONFIG=)(?P<path>[^\s\"']+)"
+)
+ENVIRONMENT_FILE_RE = re.compile(r"^EnvironmentFile=-?(?P<path>[^\s\"']+)$")
+SERVICE_POINTER_DIRECTIVES = (
+    b"ExecStart=",
+    b"ExecStartPre=",
+    b"ExecReload=",
+    b"ExecStop=",
+    b"Environment=",
+    b"EnvironmentFile=",
+)
+MAX_SERVICE_UNIT_BYTES = 64 * 1024
 
 
 class RehearsalError(RuntimeError):
@@ -1938,6 +1966,506 @@ def build_installation_candidate_lock(
     }, status
 
 
+def parse_utc_timestamp(value: Any, field: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise RehearsalError(f"{field} must be a non-empty timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RehearsalError(f"{field} is not a valid timestamp") from exc
+    if parsed.tzinfo is None:
+        raise RehearsalError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def read_regular_file_digest(path: Path) -> tuple[str, str]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RehearsalError(f"cannot open observed file: {path.name}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RehearsalError(f"observed content is not a regular file: {path.name}")
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return "file", "sha256:" + digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def observed_path_type(path: Path) -> str:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise RehearsalError(f"cannot inspect observed path: {path.name}") from exc
+    if stat.S_ISREG(metadata.st_mode):
+        return "file"
+    if stat.S_ISDIR(metadata.st_mode):
+        return "directory"
+    raise RehearsalError(f"observed path has unsupported type: {path.name}")
+
+
+def parse_observation_spec(value: Any) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != INSTALLATION_OBSERVATION_SCHEMA
+        or set(value) != {"schema", "components", "services"}
+        or not isinstance(value.get("components"), list)
+        or not isinstance(value.get("services"), list)
+    ):
+        raise RehearsalError("installation observation spec is invalid")
+    component_keys: set[tuple[str, str]] = set()
+    for item in value["components"]:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {"component_id", "artifact_ref", "name", "path", "mode"}
+            or not isinstance(item.get("component_id"), str)
+            or not item["component_id"]
+            or not isinstance(item.get("artifact_ref"), str)
+            or not item["artifact_ref"]
+            or not isinstance(item.get("name"), str)
+            or not SAFE_OBSERVATION_NAME_RE.fullmatch(item["name"])
+            or not isinstance(item.get("path"), str)
+            or not item["path"]
+            or item.get("mode") not in {"content_sha256", "identity_only"}
+        ):
+            raise RehearsalError("installation observation component is invalid")
+        key = (item["component_id"], item["artifact_ref"])
+        if key in component_keys:
+            raise RehearsalError("installation observation has duplicate components")
+        component_keys.add(key)
+    service_names: set[str] = set()
+    for item in value["services"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"name", "path"}
+            or not isinstance(item.get("name"), str)
+            or not SAFE_OBSERVATION_NAME_RE.fullmatch(item["name"])
+            or item["name"] in service_names
+            or not isinstance(item.get("path"), str)
+            or not item["path"]
+        ):
+            raise RehearsalError("installation observation service is invalid or duplicate")
+        service_names.add(item["name"])
+    return value
+
+
+def read_service_config_pointers(path: Path) -> list[str]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RehearsalError(f"cannot open observed service unit: {path.name}") from exc
+    pointers: list[str] = []
+    total = 0
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RehearsalError(f"observed service unit is not a regular file: {path.name}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            for raw_line in handle:
+                total += len(raw_line)
+                if total > MAX_SERVICE_UNIT_BYTES:
+                    raise RehearsalError(
+                        f"observed service unit exceeds size limit: {path.name}"
+                    )
+                stripped = raw_line.strip()
+                if not stripped.startswith(SERVICE_POINTER_DIRECTIVES):
+                    continue
+                try:
+                    line = stripped.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise RehearsalError(
+                        f"observed service pointer line is not UTF-8: {path.name}"
+                    ) from exc
+                pointers.extend(
+                    match.group("path") for match in SERVICE_POINTER_RE.finditer(line)
+                )
+                environment_file = ENVIRONMENT_FILE_RE.fullmatch(line)
+                if environment_file is not None:
+                    pointers.append(environment_file.group("path"))
+    finally:
+        os.close(descriptor)
+    return pointers
+
+
+def build_installation_attestation(
+    candidate_lock: Any,
+    observation_spec: Any,
+    *,
+    generated_at: str,
+    ttl_seconds: int,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    residue: list[dict[str, str]] = []
+    observed_components: list[dict[str, str]] = []
+    observed_services: list[dict[str, Any]] = []
+    missing: list[dict[str, str]] = []
+    current_root: str | None = None
+    try:
+        if (
+            not isinstance(candidate_lock, dict)
+            or candidate_lock.get("schema") != INSTALLATION_CANDIDATE_LOCK_SCHEMA
+            or candidate_lock.get("status") != "success"
+            or not isinstance(candidate_lock.get("current"), dict)
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(candidate_lock.get("current_root", "")),
+            )
+        ):
+            raise RehearsalError("current installation candidate lock is unavailable")
+        current_root = candidate_lock["current_root"]
+        spec = parse_observation_spec(observation_spec)
+        candidates: dict[tuple[str, str], dict[str, Any]] = {}
+        required_external: set[tuple[str, str]] = set()
+        for component in candidate_lock["current"].get("components", []):
+            component_id = component.get("id")
+            for artifact in component.get("artifacts", []):
+                key = (component_id, artifact.get("ref"))
+                candidates[key] = artifact
+                if artifact.get("kind") in (
+                    ATTESTATION_CONTENT_KINDS | ATTESTATION_IDENTITY_KINDS
+                ):
+                    required_external.add(key)
+
+        observed_keys: set[tuple[str, str]] = set()
+        configuration_paths: dict[str, str] = {}
+        for item in spec["components"]:
+            key = (item["component_id"], item["artifact_ref"])
+            artifact = candidates.get(key)
+            path = Path(item["path"]).expanduser()
+            if artifact is None:
+                residue.append(
+                    {
+                        "kind": "undeclared_component",
+                        "name": item["name"],
+                        "component_id": item["component_id"],
+                    }
+                )
+                continue
+            artifact_kind = artifact["kind"]
+            if item["mode"] == "content_sha256":
+                if artifact_kind not in ATTESTATION_CONTENT_KINDS:
+                    raise RehearsalError(
+                        f"content hashing is not allowed for {artifact_kind}"
+                    )
+                path_type, digest = read_regular_file_digest(path)
+                status = "success" if digest == artifact["integrity"] else "failed"
+                if status == "failed":
+                    residue.append(
+                        {
+                            "kind": "artifact_integrity_mismatch",
+                            "name": item["name"],
+                            "component_id": item["component_id"],
+                        }
+                    )
+            else:
+                if artifact_kind not in ATTESTATION_IDENTITY_KINDS:
+                    raise RehearsalError(
+                        f"identity-only observation is not allowed for {artifact_kind}"
+                    )
+                path_type = observed_path_type(path)
+                digest = canonical_digest(
+                    {
+                        "component_id": item["component_id"],
+                        "artifact_ref": item["artifact_ref"],
+                        "name": item["name"],
+                        "type": path_type,
+                    }
+                )
+                status = "success"
+                if artifact_kind == "configuration_identity":
+                    configuration_paths[os.path.abspath(path)] = item["component_id"]
+            observed_keys.add(key)
+            observed_components.append(
+                {
+                    "component_id": item["component_id"],
+                    "artifact_ref": item["artifact_ref"],
+                    "name": item["name"],
+                    "type": path_type,
+                    "mode": item["mode"],
+                    "digest": digest,
+                    "status": status,
+                }
+            )
+
+        for component_id, artifact_ref in sorted(required_external - observed_keys):
+            missing.append(
+                {
+                    "component_id": component_id,
+                    "artifact_ref": artifact_ref,
+                }
+            )
+
+        for service in spec["services"]:
+            pointers = read_service_config_pointers(Path(service["path"]).expanduser())
+            pointer_results: list[dict[str, Any]] = []
+            for pointer in pointers:
+                pointer_name = Path(pointer).name
+                if not SAFE_OBSERVATION_NAME_RE.fullmatch(pointer_name):
+                    raise RehearsalError(
+                        f"service {service['name']} contains an unsafe config pointer"
+                    )
+                component_id = configuration_paths.get(os.path.abspath(pointer))
+                declared = component_id is not None
+                pointer_results.append(
+                    {
+                        "name": pointer_name,
+                        "declared": declared,
+                        "component_id": component_id,
+                    }
+                )
+                if not declared:
+                    residue.append(
+                        {
+                            "kind": "undeclared_generated_config",
+                            "name": pointer_name,
+                            "component_id": "",
+                        }
+                    )
+            pointer_results.sort(key=lambda item: item["name"])
+            observed_services.append(
+                {
+                    "name": service["name"],
+                    "type": "service_unit",
+                    "config_pointers": pointer_results,
+                    "digest": canonical_digest(
+                        {
+                            "name": service["name"],
+                            "config_pointers": pointer_results,
+                        }
+                    ),
+                }
+            )
+    except (KeyError, OSError, RehearsalError) as exc:
+        errors.append(str(exc))
+
+    observed_components.sort(
+        key=lambda item: (item["component_id"], item["artifact_ref"])
+    )
+    observed_services.sort(key=lambda item: item["name"])
+    residue.sort(key=lambda item: (item["kind"], item["name"], item["component_id"]))
+    observation_status = "failed" if errors else "success"
+    completeness_status = (
+        "unknown"
+        if errors
+        else "incomplete"
+        if residue or missing
+        else "complete"
+    )
+    freshness_status = "unknown" if current_root is None else "fresh"
+    content = {
+        "candidate_root": current_root,
+        "observed_components": observed_components,
+        "observed_services": observed_services,
+        "missing": missing,
+        "residue": residue,
+    }
+    status = (
+        "success"
+        if observation_status == "success"
+        and freshness_status == "fresh"
+        and completeness_status == "complete"
+        else "failed"
+    )
+    generated = parse_utc_timestamp(generated_at, "generated_at")
+    return {
+        "schema": INSTALLATION_ATTESTATION_SCHEMA,
+        "generated_at": generated_at,
+        "expires_at": (
+            generated + timedelta(seconds=ttl_seconds)
+        ).replace(microsecond=0).isoformat(),
+        "effect": "read_only_local_installation_attestation",
+        "runtime_effect": "none",
+        "external_effect": "none",
+        "external_write_effect": "none",
+        "production_apply_allowed": False,
+        "operator_approval": False,
+        "status": status,
+        "axes": {
+            "observation": observation_status,
+            "freshness": freshness_status,
+            "completeness": completeness_status,
+        },
+        "attestation_content": content,
+        "attestation_digest": canonical_digest(content),
+        "errors": errors,
+    }
+
+
+def failed_installation_attestation(
+    generated_at: str,
+    candidate_root: str | None,
+) -> dict[str, Any]:
+    content = {
+        "candidate_root": candidate_root,
+        "observed_components": [],
+        "observed_services": [],
+        "missing": [],
+        "residue": [],
+    }
+    return {
+        "schema": INSTALLATION_ATTESTATION_SCHEMA,
+        "generated_at": generated_at,
+        "expires_at": generated_at,
+        "effect": "read_only_local_installation_attestation",
+        "runtime_effect": "none",
+        "external_effect": "none",
+        "external_write_effect": "none",
+        "production_apply_allowed": False,
+        "operator_approval": False,
+        "status": "failed",
+        "axes": {
+            "observation": "failed",
+            "freshness": "unknown",
+            "completeness": "unknown",
+        },
+        "attestation_content": content,
+        "attestation_digest": canonical_digest(content),
+        "errors": [
+            "installation attestation is missing, stale, incomplete, or invalid"
+        ],
+    }
+
+
+def parse_installation_attestation(
+    value: Any,
+    *,
+    expected_candidate: dict[str, Any] | None,
+    checked_at: str,
+) -> dict[str, Any]:
+    required_fields = {
+        "schema",
+        "generated_at",
+        "expires_at",
+        "effect",
+        "runtime_effect",
+        "external_effect",
+        "external_write_effect",
+        "production_apply_allowed",
+        "operator_approval",
+        "status",
+        "axes",
+        "attestation_content",
+        "attestation_digest",
+        "errors",
+    }
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != INSTALLATION_ATTESTATION_SCHEMA
+        or set(value) != required_fields
+    ):
+        raise RehearsalError("installation attestation is invalid")
+    invariants = {
+        "effect": "read_only_local_installation_attestation",
+        "runtime_effect": "none",
+        "external_effect": "none",
+        "external_write_effect": "none",
+        "production_apply_allowed": False,
+        "operator_approval": False,
+    }
+    if any(value.get(field) != expected for field, expected in invariants.items()):
+        raise RehearsalError("installation attestation safety invariant failed")
+    axes = value.get("axes")
+    if (
+        not isinstance(axes, dict)
+        or set(axes) != {"observation", "freshness", "completeness"}
+        or axes.get("observation") not in {"success", "failed"}
+        or axes.get("freshness") not in {"fresh", "stale", "unknown"}
+        or axes.get("completeness") not in {"complete", "incomplete", "unknown"}
+    ):
+        raise RehearsalError("installation attestation axes are invalid")
+    content = value.get("attestation_content")
+    if not isinstance(content, dict) or set(content) != {
+        "candidate_root",
+        "observed_components",
+        "observed_services",
+        "missing",
+        "residue",
+    }:
+        raise RehearsalError("installation attestation content is invalid")
+    if not isinstance(expected_candidate, dict):
+        raise RehearsalError("installation candidate is unavailable for attestation")
+    if value.get("attestation_digest") != canonical_digest(content):
+        raise RehearsalError("installation attestation digest does not match content")
+    expected_candidate_root = (
+        expected_candidate.get("root") if isinstance(expected_candidate, dict) else None
+    )
+    if content.get("candidate_root") != expected_candidate_root:
+        raise RehearsalError("installation attestation candidate root is stale")
+    expected_external = {
+        (component["id"], artifact["ref"])
+        for component in (expected_candidate or {}).get("components", [])
+        for artifact in component.get("artifacts", [])
+        if artifact.get("kind") in (
+            ATTESTATION_CONTENT_KINDS | ATTESTATION_IDENTITY_KINDS
+        )
+    }
+    observed_components = content.get("observed_components")
+    if not isinstance(observed_components, list) or any(
+        not isinstance(item, dict)
+        or item.get("status") != "success"
+        or not isinstance(item.get("component_id"), str)
+        or not isinstance(item.get("artifact_ref"), str)
+        for item in observed_components
+    ):
+        raise RehearsalError("installation attestation component observations are invalid")
+    observed_external = {
+        (item["component_id"], item["artifact_ref"]) for item in observed_components
+    }
+    if observed_external != expected_external:
+        raise RehearsalError("installation attestation does not cover external artifacts")
+    if content.get("missing") != [] or content.get("residue") != []:
+        raise RehearsalError("installation attestation contains unresolved residue")
+    observed_services = content.get("observed_services")
+    if not isinstance(observed_services, list) or any(
+        not isinstance(service, dict)
+        or any(
+            not isinstance(pointer, dict) or pointer.get("declared") is not True
+            for pointer in service.get("config_pointers", [])
+        )
+        for service in observed_services
+    ):
+        raise RehearsalError("installation attestation service observations are invalid")
+    if parse_utc_timestamp(value["expires_at"], "expires_at") <= parse_utc_timestamp(
+        checked_at, "checked_at"
+    ):
+        raise RehearsalError("installation attestation has expired")
+    if (
+        value.get("status") != "success"
+        or axes != {
+            "observation": "success",
+            "freshness": "fresh",
+            "completeness": "complete",
+        }
+        or value.get("errors") != []
+    ):
+        raise RehearsalError("installation attestation is not complete and fresh")
+    return value
+
+
+def attest(args: argparse.Namespace) -> int:
+    if args.ttl_seconds <= 0:
+        raise RehearsalError("attestation ttl must be positive")
+    generated_at = now_iso()
+    candidate_lock = read_json(args.candidate_lock.resolve())
+    observation_spec = read_json(args.observation.resolve())
+    document = build_installation_attestation(
+        candidate_lock,
+        observation_spec,
+        generated_at=generated_at,
+        ttl_seconds=args.ttl_seconds,
+    )
+    write_json(args.output.resolve(), document)
+    print(args.output.resolve())
+    return 0 if document["status"] == "success" else 2
+
+
 def artifact_reference(path: Path, status: str) -> dict[str, Any]:
     return {"path": path.name, "sha256": digest_file(path), "status": status}
 
@@ -2199,6 +2727,21 @@ def simulate(args: argparse.Namespace) -> int:
             installation_contract,
             common,
         )
+    installation_attestation_status = "failed"
+    installation_attestation = failed_installation_attestation(
+        generated_at,
+        installation_candidate_lock.get("current_root"),
+    )
+    if args.installation_attestation:
+        try:
+            installation_attestation = parse_installation_attestation(
+                read_json(args.installation_attestation.resolve()),
+                expected_candidate=installation_candidate_lock.get("current"),
+                checked_at=generated_at,
+            )
+            installation_attestation_status = "success"
+        except RehearsalError:
+            pass
     postcheck_plan = {
         "schema": "openclaw.safe_update.post_upgrade_e2e.v1",
         **common,
@@ -2222,6 +2765,7 @@ def simulate(args: argparse.Namespace) -> int:
     runtime_path = output_dir / "runtime-truth.json"
     core_candidate_path = output_dir / "core-candidate-lock.json"
     installation_candidate_path = output_dir / "installation-candidate-lock.json"
+    installation_attestation_path = output_dir / "installation-attestation.json"
     synthetic_path = output_dir / "synthetic-update.json"
     customization_path = output_dir / "customization-compatibility.json"
     coverage_path = output_dir / "coverage-report.json"
@@ -2229,6 +2773,7 @@ def simulate(args: argparse.Namespace) -> int:
     write_json(runtime_path, runtime_truth)
     write_json(core_candidate_path, core_candidate_lock)
     write_json(installation_candidate_path, installation_candidate_lock)
+    write_json(installation_attestation_path, installation_attestation)
     write_json(synthetic_path, synthetic)
     write_json(customization_path, customizations)
     write_json(coverage_path, coverage_report)
@@ -2240,6 +2785,7 @@ def simulate(args: argparse.Namespace) -> int:
             runtime_status,
             core_candidate_status,
             installation_candidate_status,
+            installation_attestation_status,
             synthetic_status,
             customization_status,
             coverage_status,
@@ -2257,6 +2803,10 @@ def simulate(args: argparse.Namespace) -> int:
             artifact_reference(
                 installation_candidate_path,
                 installation_candidate_status,
+            ),
+            artifact_reference(
+                installation_attestation_path,
+                installation_attestation_status,
             ),
             artifact_reference(synthetic_path, synthetic_status),
             artifact_reference(customization_path, customization_status),
@@ -2279,6 +2829,7 @@ def simulate(args: argparse.Namespace) -> int:
             "runtime_truth": runtime_status,
             "core_candidate_lock": core_candidate_status,
             "installation_candidate_lock": installation_candidate_status,
+            "installation_attestation": installation_attestation_status,
             "synthetic_update": synthetic_status,
             "customization_compatibility": customization_status,
             "installation_coverage": coverage_status,
@@ -2310,6 +2861,7 @@ def simulate(args: argparse.Namespace) -> int:
         f"- Install shape: `{coverage_profile.get('install_shape') or 'unknown'}`\n"
         f"- Current candidate root: `{installation_candidate_lock['current_root'] or 'unavailable'}`\n"
         f"- Target candidate root: `{installation_candidate_lock['target_root'] or 'unavailable'}`\n"
+        f"- Installation attestation: `{installation_attestation_status}`\n"
         f"- Evidence bundle: `{evidence_path.name}` (`{digest_file(evidence_path)}`)\n"
         f"- Post-upgrade E2E plan: `{postcheck_path.name}`\n\n"
         "## Required operator inputs\n\n"
@@ -2330,6 +2882,7 @@ def simulate(args: argparse.Namespace) -> int:
         f"- Runtime evidence: `{runtime_status}`\n"
         f"- Core candidate lock: `{core_candidate_status}`\n"
         f"- Installation candidate lock: `{installation_candidate_status}`\n"
+        f"- Installation attestation: `{installation_attestation_status}`\n"
         f"- Package evidence: `{synthetic_status}`\n"
         f"- Customization evidence: `{customization_status}`\n"
         f"- Installation coverage: `{coverage_status}`\n"
@@ -2356,6 +2909,16 @@ def parser() -> argparse.ArgumentParser:
     inventory_parser.add_argument("--output-dir", type=Path, required=True)
     inventory_parser.set_defaults(handler=inventory)
 
+    attest_parser = subcommands.add_parser(
+        "attest",
+        help="create a public-safe local installation attestation",
+    )
+    attest_parser.add_argument("--candidate-lock", type=Path, required=True)
+    attest_parser.add_argument("--observation", type=Path, required=True)
+    attest_parser.add_argument("--ttl-seconds", type=int, default=900)
+    attest_parser.add_argument("--output", type=Path, required=True)
+    attest_parser.set_defaults(handler=attest)
+
     fetch_parser = subcommands.add_parser("fetch", help="fetch immutable npm package evidence")
     fetch_parser.add_argument("--current-version", required=True)
     fetch_parser.add_argument("--target-version", required=True)
@@ -2375,6 +2938,7 @@ def parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--allow-no-customizations", action="store_true")
     simulate_parser.add_argument("--coverage", type=Path)
     simulate_parser.add_argument("--installation-contract", type=Path)
+    simulate_parser.add_argument("--installation-attestation", type=Path)
     simulate_parser.add_argument("--allow-no-coverage", action="store_true")
     simulate_parser.add_argument("--runtime-node-version")
     simulate_parser.add_argument("--runtime-os")

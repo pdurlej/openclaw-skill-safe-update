@@ -28,6 +28,9 @@ STATUS_SCHEMA = ROOT / "schemas" / "openclaw.safe_update.status.v2.schema.json"
 INSTALLATION_CANDIDATE_SCHEMA = (
     ROOT / "schemas" / "openclaw.safe_update.installation_candidate_lock.v1.schema.json"
 )
+INSTALLATION_ATTESTATION_SCHEMA = (
+    ROOT / "schemas" / "openclaw.safe_update.installation_attestation.v1.schema.json"
+)
 BASELINE = ROOT / "references" / "v1.1-baseline.json"
 SIGNAL_VOICE_CONTRACT = ROOT / "examples" / "signal-voice.installation-contract.json"
 COMPOSED_INSTALLATION_CONTRACT = (
@@ -262,11 +265,49 @@ class SafeUpdateTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        checks, _, _ = SAFE_UPDATE.load_customizations(self.customizations, False)
+        coverage_profile, _, _ = SAFE_UPDATE.load_coverage(self.coverage, False)
+        installation_contract = SAFE_UPDATE.adapt_v1_installation_contract(
+            checks,
+            coverage_profile,
+        )
+        candidate_lock, candidate_status = SAFE_UPDATE.build_installation_candidate_lock(
+            metadata,
+            installation_contract,
+            {
+                "generated_at": SAFE_UPDATE.now_iso(),
+                **SAFE_UPDATE.safety_fields(),
+            },
+        )
+        self.assertEqual(candidate_status, "success")
+        self.default_candidate_lock = candidate_lock
+        self.attestation = self.root / "installation-attestation.json"
+        attestation = SAFE_UPDATE.build_installation_attestation(
+            candidate_lock,
+            {
+                "schema": SAFE_UPDATE.INSTALLATION_OBSERVATION_SCHEMA,
+                "components": [],
+                "services": [],
+            },
+            generated_at=SAFE_UPDATE.now_iso(),
+            ttl_seconds=3600,
+        )
+        self.assertEqual(attestation["status"], "success")
+        self.attestation.write_text(json.dumps(attestation), encoding="utf-8")
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def run_simulation(self, *extra: str) -> subprocess.CompletedProcess[str]:
+    def run_simulation(
+        self,
+        *extra: str,
+        include_attestation: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        attestation_args = (
+            ["--installation-attestation", str(self.attestation)]
+            if include_attestation
+            else []
+        )
         return subprocess.run(
             [
                 sys.executable,
@@ -278,6 +319,7 @@ class SafeUpdateTest(unittest.TestCase):
                 str(self.root / "output"),
                 "--coverage",
                 str(self.coverage),
+                *attestation_args,
                 *extra,
             ],
             capture_output=True,
@@ -556,6 +598,7 @@ class SafeUpdateTest(unittest.TestCase):
             "runtime_truth": "success",
             "core_candidate_lock": "success",
             "installation_candidate_lock": "success",
+            "installation_attestation": "success",
             "synthetic_update": "success",
             "customization_compatibility": "success",
             "installation_coverage": "success",
@@ -1021,11 +1064,85 @@ class SafeUpdateTest(unittest.TestCase):
                 self.assertTrue(any(expected in error for error in report["errors"]))
 
     def test_simulation_binds_one_composed_root_into_status_and_evidence(self) -> None:
+        contract = json.loads(COMPOSED_INSTALLATION_CONTRACT.read_text())
+        sidecar_path = self.root / "mcp-broker.tgz"
+        sidecar_path.write_bytes(b"pinned sidecar artifact")
+        sidecar_digest = hashlib.sha256(sidecar_path.read_bytes()).hexdigest()
+        sidecar_component = next(
+            item for item in contract["components"] if item["id"] == "sidecar.mcp"
+        )
+        sidecar_component["artifacts"][0]["ref"] = (
+            f"mcp-broker@2.1.0#sha256:{sidecar_digest}"
+        )
+        contract_path = self.root / "composed-contract.json"
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+        config_path = self.root / "signal-media.json"
+        config_path.write_text("SECRET_VALUE=not-for-output", encoding="utf-8")
+        personalization_path = self.root / "conversation-voice"
+        personalization_path.mkdir()
+        metadata = json.loads((self.input / "input-metadata.json").read_text())
+        candidate_lock, candidate_status = SAFE_UPDATE.build_installation_candidate_lock(
+            metadata,
+            contract,
+            {
+                "generated_at": SAFE_UPDATE.now_iso(),
+                **SAFE_UPDATE.safety_fields(),
+            },
+        )
+        self.assertEqual(candidate_status, "success")
+        external_artifacts = {
+            component["id"]: component["artifacts"][0]["ref"]
+            for component in contract["components"]
+            if component["id"]
+            in {
+                "configuration.signal-media",
+                "sidecar.mcp",
+                "personalization.voice",
+            }
+        }
+        observation = {
+            "schema": SAFE_UPDATE.INSTALLATION_OBSERVATION_SCHEMA,
+            "components": [
+                {
+                    "component_id": "configuration.signal-media",
+                    "artifact_ref": external_artifacts["configuration.signal-media"],
+                    "name": "signal-media",
+                    "path": str(config_path),
+                    "mode": "identity_only",
+                },
+                {
+                    "component_id": "sidecar.mcp",
+                    "artifact_ref": external_artifacts["sidecar.mcp"],
+                    "name": "mcp-broker",
+                    "path": str(sidecar_path),
+                    "mode": "content_sha256",
+                },
+                {
+                    "component_id": "personalization.voice",
+                    "artifact_ref": external_artifacts["personalization.voice"],
+                    "name": "conversation-voice",
+                    "path": str(personalization_path),
+                    "mode": "identity_only",
+                },
+            ],
+            "services": [],
+        }
+        attestation = SAFE_UPDATE.build_installation_attestation(
+            candidate_lock,
+            observation,
+            generated_at=SAFE_UPDATE.now_iso(),
+            ttl_seconds=3600,
+        )
+        attestation_path = self.root / "composed-attestation.json"
+        attestation_path.write_text(json.dumps(attestation), encoding="utf-8")
         result = self.run_simulation(
             "--customizations",
             str(self.customizations),
             "--installation-contract",
-            str(COMPOSED_INSTALLATION_CONTRACT),
+            str(contract_path),
+            "--installation-attestation",
+            str(attestation_path),
+            include_attestation=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         output = self.root / "output"
@@ -1063,7 +1180,211 @@ class SafeUpdateTest(unittest.TestCase):
             SAFE_UPDATE.INSTALLATION_CANDIDATE_LOCK_SCHEMA,
         )
         self.assertFalse(schema["additionalProperties"])
+        self.assertNotIn("SECRET_VALUE", json.dumps(attestation))
         self.assertEqual(SAFE_UPDATE.parse_status(status), status)
+
+    def test_attestation_detects_undeclared_overlay(self) -> None:
+        overlay = self.root / "undeclared-overlay.js"
+        overlay.write_text("not emitted", encoding="utf-8")
+        attestation = SAFE_UPDATE.build_installation_attestation(
+            self.default_candidate_lock,
+            {
+                "schema": SAFE_UPDATE.INSTALLATION_OBSERVATION_SCHEMA,
+                "components": [
+                    {
+                        "component_id": "overlay.undeclared",
+                        "artifact_ref": (
+                            "overlay@1.0.0#sha256:" + "a" * 64
+                        ),
+                        "name": "undeclared-overlay",
+                        "path": str(overlay),
+                        "mode": "content_sha256",
+                    }
+                ],
+                "services": [],
+            },
+            generated_at=SAFE_UPDATE.now_iso(),
+            ttl_seconds=900,
+        )
+
+        self.assertEqual(attestation["status"], "failed")
+        self.assertEqual(attestation["axes"]["observation"], "success")
+        self.assertEqual(attestation["axes"]["completeness"], "incomplete")
+        self.assertEqual(
+            attestation["attestation_content"]["residue"][0]["kind"],
+            "undeclared_component",
+        )
+        self.assertNotIn(str(self.root), json.dumps(attestation))
+        self.assertNotIn("not emitted", json.dumps(attestation))
+
+    def test_attestation_detects_service_pointer_to_undeclared_config(self) -> None:
+        generated_config = self.root / "generated-openclaw.json"
+        generated_config.write_text("TOKEN=must-not-be-read", encoding="utf-8")
+        directives = {
+            "exec": f"ExecStart=/usr/bin/openclaw gateway --config {generated_config}\n",
+            "environment_file": f"EnvironmentFile={generated_config}\n",
+        }
+        for name, directive in directives.items():
+            with self.subTest(name=name):
+                service = self.root / f"{name}.service"
+                service.write_text(
+                    "[Service]\n" + directive,
+                    encoding="utf-8",
+                )
+                attestation = SAFE_UPDATE.build_installation_attestation(
+                    self.default_candidate_lock,
+                    {
+                        "schema": SAFE_UPDATE.INSTALLATION_OBSERVATION_SCHEMA,
+                        "components": [],
+                        "services": [
+                            {
+                                "name": f"{name}.service",
+                                "path": str(service),
+                            }
+                        ],
+                    },
+                    generated_at=SAFE_UPDATE.now_iso(),
+                    ttl_seconds=900,
+                )
+
+                self.assertEqual(attestation["status"], "failed")
+                self.assertEqual(attestation["axes"]["completeness"], "incomplete")
+                self.assertEqual(
+                    attestation["attestation_content"]["residue"][0]["kind"],
+                    "undeclared_generated_config",
+                )
+                serialized = json.dumps(attestation)
+                self.assertNotIn(str(self.root), serialized)
+                self.assertNotIn("TOKEN=must-not-be-read", serialized)
+
+    def test_matching_attestation_digest_is_stable(self) -> None:
+        observation = {
+            "schema": SAFE_UPDATE.INSTALLATION_OBSERVATION_SCHEMA,
+            "components": [],
+            "services": [],
+        }
+        first = SAFE_UPDATE.build_installation_attestation(
+            self.default_candidate_lock,
+            observation,
+            generated_at="2026-07-18T00:00:00+00:00",
+            ttl_seconds=900,
+        )
+        second = SAFE_UPDATE.build_installation_attestation(
+            self.default_candidate_lock,
+            observation,
+            generated_at="2026-07-18T01:00:00+00:00",
+            ttl_seconds=900,
+        )
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(first["attestation_content"], second["attestation_content"])
+        self.assertEqual(first["attestation_digest"], second["attestation_digest"])
+
+    def test_attest_command_writes_strict_public_safe_artifact(self) -> None:
+        candidate_path = self.root / "candidate-lock.json"
+        candidate_path.write_text(
+            json.dumps(self.default_candidate_lock),
+            encoding="utf-8",
+        )
+        observation_path = self.root / "observation.json"
+        observation_path.write_text(
+            json.dumps(
+                {
+                    "schema": SAFE_UPDATE.INSTALLATION_OBSERVATION_SCHEMA,
+                    "components": [],
+                    "services": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        output = self.root / "attested.json"
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "attest",
+                "--candidate-lock",
+                str(candidate_path),
+                "--observation",
+                str(observation_path),
+                "--output",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        attestation = json.loads(output.read_text())
+        schema = json.loads(INSTALLATION_ATTESTATION_SCHEMA.read_text())
+        self.assertEqual(attestation["status"], "success")
+        self.assertEqual(
+            schema["properties"]["schema"]["const"],
+            SAFE_UPDATE.INSTALLATION_ATTESTATION_SCHEMA,
+        )
+        self.assertFalse(schema["additionalProperties"])
+        self.assertNotIn(str(self.root), output.read_text())
+
+    def test_missing_and_expired_attestation_block_ready_status(self) -> None:
+        missing = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            include_attestation=False,
+        )
+        self.assertEqual(missing.returncode, 2)
+        verdict = json.loads((self.root / "output" / "verdict.json").read_text())
+        self.assertEqual(verdict["verdict"], "blocked")
+        self.assertEqual(
+            verdict["decision_content"]["evidence_status"][
+                "installation_attestation"
+            ],
+            "failed",
+        )
+        failed_attestation = json.loads(
+            (self.root / "output" / "installation-attestation.json").read_text()
+        )
+        schema = json.loads(INSTALLATION_ATTESTATION_SCHEMA.read_text())
+        self.assertEqual(set(failed_attestation), set(schema["required"]))
+
+        expired = json.loads(self.attestation.read_text())
+        expired["expires_at"] = "2026-01-01T00:00:00+00:00"
+        expired_path = self.root / "expired-attestation.json"
+        expired_path.write_text(json.dumps(expired), encoding="utf-8")
+        stale = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            "--installation-attestation",
+            str(expired_path),
+            include_attestation=False,
+        )
+        self.assertEqual(stale.returncode, 2)
+        verdict = json.loads((self.root / "output" / "verdict.json").read_text())
+        self.assertEqual(verdict["verdict"], "blocked")
+
+        stale_root = json.loads(self.attestation.read_text())
+        stale_root["attestation_content"]["candidate_root"] = "sha256:" + "9" * 64
+        stale_root["attestation_digest"] = SAFE_UPDATE.canonical_digest(
+            stale_root["attestation_content"]
+        )
+        stale_root_path = self.root / "stale-root-attestation.json"
+        stale_root_path.write_text(json.dumps(stale_root), encoding="utf-8")
+        stale = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            "--installation-attestation",
+            str(stale_root_path),
+            include_attestation=False,
+        )
+        self.assertEqual(stale.returncode, 2)
+        verdict = json.loads((self.root / "output" / "verdict.json").read_text())
+        self.assertEqual(
+            verdict["decision_content"]["evidence_status"][
+                "installation_attestation"
+            ],
+            "failed",
+        )
 
     def test_integrity_mismatch_blocks(self) -> None:
         with self.target_archive.open("ab") as handle:
