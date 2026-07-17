@@ -149,10 +149,11 @@ python3 scripts/openclaw_safe_update.py simulate \
   --coverage .openclaw-safe-update/coverage.json \
   --installation-contract artifacts/installation-contract.json \
   --installation-attestation artifacts/installation-attestation.json \
+  --conservative-inputs .openclaw-safe-update/conservative-inputs.json \
   --output-dir artifacts/safe-update
 ```
 
-The first simulation deliberately blocks while still writing the candidate lock. The local attestation step emits only sanitized names, types, and digests; it never emits local paths or opens configuration/personalization contents. The second rehearsal can become ready only with a fresh, complete attestation bound to the current composed root. Missing or non-reproducible closure data, floating external artifacts, unexplained local residue, undeclared service config pointers, stale attestation, environment drift, incompatible or unproven Node requirements, and changed package lifecycle scripts block the rehearsal.
+The first simulation deliberately blocks while still writing the candidate lock. The local attestation step emits only sanitized names, types, and digests; it never emits local paths or opens configuration/personalization contents. The second rehearsal can become ready only with a fresh, complete attestation bound to the current composed root and hash-bound rollback evidence in the conservative inputs. Missing or non-reproducible closure data, floating external artifacts, unexplained local residue, undeclared service config pointers, stale attestation, lossy authority input, environment drift, incompatible or unproven Node requirements, and changed package lifecycle scripts block the rehearsal.
 
 For a genuinely vanilla deployment, `--allow-no-customizations --allow-no-coverage --runtime-node-version <exact-version> --runtime-os <os> --runtime-arch <arch> --runtime-libc <libc>` may be used only after explicitly confirming that there are no local overlays, patches, wrappers, plugin contracts, or runtime-specific integrations. Do not silently add either flag to automation.
 
@@ -164,6 +165,7 @@ Inspect these artifacts:
 - `core-candidate-lock.json`
 - `installation-candidate-lock.json`
 - `installation-attestation.json`
+- `conservative-gates.json`
 - `synthetic-update.json`
 - `customization-compatibility.json`
 - `coverage-report.json`

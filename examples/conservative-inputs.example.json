@@ -1,0 +1,10 @@
+{
+  "schema": "openclaw.safe_update.conservative_inputs.v1",
+  "satisfied_gates": [
+    {
+      "id": "rollback-evidence",
+      "evidence_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "operator_escalations": []
+}

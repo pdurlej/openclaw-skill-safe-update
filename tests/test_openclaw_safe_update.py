@@ -31,6 +31,12 @@ INSTALLATION_CANDIDATE_SCHEMA = (
 INSTALLATION_ATTESTATION_SCHEMA = (
     ROOT / "schemas" / "openclaw.safe_update.installation_attestation.v1.schema.json"
 )
+CONSERVATIVE_GATES_SCHEMA = (
+    ROOT / "schemas" / "openclaw.safe_update.conservative_gates.v1.schema.json"
+)
+CONSERVATIVE_INPUTS_SCHEMA = (
+    ROOT / "schemas" / "openclaw.safe_update.conservative_inputs.v1.schema.json"
+)
 BASELINE = ROOT / "references" / "v1.1-baseline.json"
 SIGNAL_VOICE_CONTRACT = ROOT / "examples" / "signal-voice.installation-contract.json"
 COMPOSED_INSTALLATION_CONTRACT = (
@@ -294,6 +300,22 @@ class SafeUpdateTest(unittest.TestCase):
         )
         self.assertEqual(attestation["status"], "success")
         self.attestation.write_text(json.dumps(attestation), encoding="utf-8")
+        self.conservative_inputs = self.root / "conservative-inputs.json"
+        self.conservative_inputs.write_text(
+            json.dumps(
+                {
+                    "schema": SAFE_UPDATE.CONSERVATIVE_INPUTS_SCHEMA,
+                    "satisfied_gates": [
+                        {
+                            "id": "rollback-evidence",
+                            "evidence_digest": "sha256:" + "a" * 64,
+                        }
+                    ],
+                    "operator_escalations": [],
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -319,6 +341,8 @@ class SafeUpdateTest(unittest.TestCase):
                 str(self.root / "output"),
                 "--coverage",
                 str(self.coverage),
+                "--conservative-inputs",
+                str(self.conservative_inputs),
                 *attestation_args,
                 *extra,
             ],
@@ -375,6 +399,10 @@ class SafeUpdateTest(unittest.TestCase):
         candidate_lock = json.loads(
             (self.root / "output" / "core-candidate-lock.json").read_text()
         )
+        conservative = json.loads(
+            (self.root / "output" / "conservative-gates.json").read_text()
+        )
+        verdict = json.loads((self.root / "output" / "verdict.json").read_text())
         self.assertNotEqual(candidate_lock["current_root"], candidate_lock["target_root"])
         codec = next(
             item
@@ -383,6 +411,15 @@ class SafeUpdateTest(unittest.TestCase):
         )
         self.assertEqual(codec["current_version"], "3.4.2")
         self.assertEqual(codec["target_version"], "3.5.0")
+        self.assertEqual(conservative["handling"], "conservative")
+        self.assertEqual(
+            verdict["decision_content"]["gate_decision"]["handling"],
+            "conservative",
+        )
+        self.assertEqual(
+            verdict["decision_content"]["gate_decision"]["decision_digest"],
+            conservative["decision_digest"],
+        )
 
     def test_candidate_root_is_stable_across_lockfile_order(self) -> None:
         first = core_closure(
@@ -599,6 +636,7 @@ class SafeUpdateTest(unittest.TestCase):
             "core_candidate_lock": "success",
             "installation_candidate_lock": "success",
             "installation_attestation": "success",
+            "conservative_gates": "success",
             "synthetic_update": "success",
             "customization_compatibility": "success",
             "installation_coverage": "success",
@@ -610,6 +648,12 @@ class SafeUpdateTest(unittest.TestCase):
             reason="first advisory wording",
             reason_code="baseline_rehearsal_passed",
             evidence_status=evidence_status,
+            gate_decision={
+                "status": "success",
+                "handling": "baseline",
+                "required_gates": ["rollback-evidence"],
+                "decision_digest": "sha256:" + "5" * 64,
+            },
             candidate_roots={"current": "sha256:" + "3" * 64, "target": "sha256:" + "4" * 64},
             evidence_bundle={"path": "evidence-bundle.json", "sha256": "1" * 64},
             next_step="first operator wording",
@@ -621,6 +665,12 @@ class SafeUpdateTest(unittest.TestCase):
             reason="different advisory wording",
             reason_code="baseline_rehearsal_passed",
             evidence_status=evidence_status,
+            gate_decision={
+                "status": "success",
+                "handling": "baseline",
+                "required_gates": ["rollback-evidence"],
+                "decision_digest": "sha256:" + "5" * 64,
+            },
             candidate_roots={"current": "sha256:" + "3" * 64, "target": "sha256:" + "4" * 64},
             evidence_bundle={"path": "evidence-bundle.json", "sha256": "2" * 64},
             next_step="different operator wording",
@@ -759,9 +809,485 @@ class SafeUpdateTest(unittest.TestCase):
             set(evidence_status_schema["properties"]),
             SAFE_UPDATE.EVIDENCE_STATUS_FIELDS,
         )
+        gate_schema = json.loads(CONSERVATIVE_GATES_SCHEMA.read_text())
+        input_schema = json.loads(CONSERVATIVE_INPUTS_SCHEMA.read_text())
+        self.assertEqual(
+            gate_schema["properties"]["schema"]["const"],
+            SAFE_UPDATE.CONSERVATIVE_GATES_SCHEMA,
+        )
+        self.assertEqual(
+            input_schema["properties"]["schema"]["const"],
+            SAFE_UPDATE.CONSERVATIVE_INPUTS_SCHEMA,
+        )
+        self.assertFalse(gate_schema["additionalProperties"])
+        self.assertFalse(input_schema["additionalProperties"])
         self.assertEqual(baseline["commit"], BASELINE_SHA)
         self.assertEqual(baseline["test_case_count"], 13)
         self.assertEqual(baseline["test_cases"], BASELINE_TEST_CASES)
+
+    def test_conservative_policy_has_a_focused_fixture_for_every_required_row(
+        self,
+    ) -> None:
+        base_lock = {
+            "status": "success",
+            "changed_packages": [],
+            "errors": [],
+        }
+        rollback = {
+            "satisfied_gates": {
+                "rollback-evidence": "sha256:" + "a" * 64,
+            },
+            "operator_escalations": set(),
+        }
+        fixtures = [
+            (
+                "unresolved candidate closure",
+                {**base_lock, "status": "failed"},
+                "success",
+                [],
+                False,
+                rollback,
+                "candidate-closure-resolved",
+            ),
+            (
+                "stale or incomplete attestation",
+                base_lock,
+                "failed",
+                [],
+                True,
+                rollback,
+                "installation-attestation-fresh-complete",
+            ),
+            (
+                "lossy or unparsable authority input",
+                base_lock,
+                "success",
+                [],
+                False,
+                rollback,
+                "authority-input-lossless",
+            ),
+            (
+                "changed lifecycle script",
+                base_lock,
+                "success",
+                [
+                    {
+                        "name": "openclaw",
+                        "archive_diff": {"added": [], "removed": [], "changed": []},
+                        "metadata_changed_fields": ["scripts"],
+                        "risk_findings": [
+                            {
+                                "id": "lifecycle-script-changed",
+                                "severity": "blocked",
+                                "detail": "changed",
+                            }
+                        ],
+                    }
+                ],
+                True,
+                rollback,
+                "lifecycle-download-evidence",
+            ),
+            (
+                "state migration surface",
+                base_lock,
+                "success",
+                [
+                    {
+                        "name": "openclaw",
+                        "archive_diff": {
+                            "added": ["package/dist/migrations/v2.js"],
+                            "removed": [],
+                            "changed": [],
+                        },
+                        "metadata_changed_fields": [],
+                        "risk_findings": [],
+                    }
+                ],
+                True,
+                rollback,
+                "state-migration-rehearsal",
+            ),
+            (
+                "unknown rollback boundary",
+                base_lock,
+                "success",
+                [],
+                True,
+                SAFE_UPDATE.empty_conservative_inputs(),
+                "rollback-evidence",
+            ),
+            (
+                "plugin SDK contract surface",
+                base_lock,
+                "success",
+                [
+                    {
+                        "name": "openclaw",
+                        "archive_diff": {
+                            "added": [],
+                            "removed": [],
+                            "changed": ["package/dist/plugin-sdk/index.js"],
+                        },
+                        "metadata_changed_fields": [],
+                        "risk_findings": [],
+                    }
+                ],
+                True,
+                rollback,
+                "plugin-sdk-contract",
+            ),
+            (
+                "launcher and service contract surface",
+                base_lock,
+                "success",
+                [
+                    {
+                        "name": "openclaw",
+                        "archive_diff": {
+                            "added": [],
+                            "removed": [],
+                            "changed": ["package/dist/service/launcher.js"],
+                        },
+                        "metadata_changed_fields": [],
+                        "risk_findings": [],
+                    }
+                ],
+                True,
+                rollback,
+                "launcher-service-contract",
+            ),
+            (
+                "permissions contract surface",
+                base_lock,
+                "success",
+                [
+                    {
+                        "name": "openclaw",
+                        "archive_diff": {
+                            "added": [],
+                            "removed": [],
+                            "changed": ["package/dist/permissions/acl.js"],
+                        },
+                        "metadata_changed_fields": [],
+                        "risk_findings": [],
+                    }
+                ],
+                True,
+                rollback,
+                "permissions-contract",
+            ),
+            (
+                "protocol contract surface",
+                base_lock,
+                "success",
+                [
+                    {
+                        "name": "openclaw",
+                        "archive_diff": {
+                            "added": [],
+                            "removed": [],
+                            "changed": ["package/dist/protocol/wire.js"],
+                        },
+                        "metadata_changed_fields": [],
+                        "risk_findings": [],
+                    }
+                ],
+                True,
+                rollback,
+                "protocol-contract",
+            ),
+            (
+                "channel crypto contract surface",
+                base_lock,
+                "success",
+                [
+                    {
+                        "name": "openclaw",
+                        "archive_diff": {
+                            "added": [],
+                            "removed": [],
+                            "changed": ["package/extensions/signal/crypto.js"],
+                        },
+                        "metadata_changed_fields": [],
+                        "risk_findings": [],
+                    }
+                ],
+                True,
+                rollback,
+                "channel-crypto-contract",
+            ),
+            (
+                "environment install shape",
+                base_lock,
+                "success",
+                [
+                    {
+                        "name": "openclaw",
+                        "archive_diff": {"added": [], "removed": [], "changed": []},
+                        "metadata_changed_fields": ["engines"],
+                        "risk_findings": [],
+                    }
+                ],
+                True,
+                rollback,
+                "environment-matched-rehearsal",
+            ),
+            (
+                "unknown optional native dependency",
+                {
+                    **base_lock,
+                    "changed_packages": [
+                        {
+                            "current_flags": {"optional": True},
+                            "target_flags": {"optional": True},
+                            "current_selectors": {
+                                "os": ["linux"],
+                                "cpu": [],
+                                "libc": [],
+                            },
+                            "target_selectors": {
+                                "os": ["linux"],
+                                "cpu": [],
+                                "libc": [],
+                            },
+                            "current_selected": None,
+                            "target_selected": True,
+                        }
+                    ],
+                },
+                "success",
+                [],
+                True,
+                rollback,
+                "native-optional-dependency-known",
+            ),
+        ]
+        for (
+            name,
+            candidate_lock,
+            attestation_status,
+            authority_packages,
+            authority_complete,
+            inputs,
+            expected_gate,
+        ) in fixtures:
+            with self.subTest(name=name):
+                report, status = SAFE_UPDATE.evaluate_conservative_gates(
+                    core_candidate_lock=candidate_lock,
+                    installation_attestation_status=attestation_status,
+                    authority_packages=authority_packages,
+                    authority_complete=authority_complete,
+                    inputs=inputs,
+                    common={
+                        "generated_at": "2026-07-18T12:00:00+00:00",
+                        **SAFE_UPDATE.safety_fields(),
+                    },
+                )
+                decision = next(
+                    item for item in report["decisions"] if item["id"] == expected_gate
+                )
+                self.assertEqual(status, "failed")
+                self.assertEqual(report["handling"], "blocked")
+                self.assertTrue(decision["triggered"])
+                self.assertEqual(decision["outcome"], "blocked")
+
+    def test_operator_evidence_can_satisfy_a_named_gate_but_never_a_hard_block(
+        self,
+    ) -> None:
+        inputs = SAFE_UPDATE.parse_conservative_inputs(
+            {
+                "schema": SAFE_UPDATE.CONSERVATIVE_INPUTS_SCHEMA,
+                "satisfied_gates": [
+                    {
+                        "id": "rollback-evidence",
+                        "evidence_digest": "sha256:" + "1" * 64,
+                    },
+                    {
+                        "id": "state-migration-rehearsal",
+                        "evidence_digest": "sha256:" + "2" * 64,
+                    },
+                ],
+                "operator_escalations": ["state-migration-rehearsal"],
+            }
+        )
+        report, status = SAFE_UPDATE.evaluate_conservative_gates(
+            core_candidate_lock={
+                "status": "failed",
+                "changed_packages": [],
+                "errors": ["unresolved closure"],
+            },
+            installation_attestation_status="success",
+            authority_packages=[],
+            authority_complete=True,
+            inputs=inputs,
+            common={
+                "generated_at": "2026-07-18T12:00:00+00:00",
+                **SAFE_UPDATE.safety_fields(),
+            },
+        )
+
+        self.assertEqual(status, "failed")
+        self.assertEqual(report["handling"], "blocked")
+        closure = next(
+            item
+            for item in report["decisions"]
+            if item["id"] == "candidate-closure-resolved"
+        )
+        state = next(
+            item
+            for item in report["decisions"]
+            if item["id"] == "state-migration-rehearsal"
+        )
+        self.assertEqual(closure["outcome"], "blocked")
+        self.assertEqual(state["outcome"], "conservative")
+
+    def test_conservative_inputs_cannot_set_or_waive_a_verdict(self) -> None:
+        with self.assertRaisesRegex(
+            SAFE_UPDATE.RehearsalError,
+            "unknown or missing",
+        ):
+            SAFE_UPDATE.parse_conservative_inputs(
+                {
+                    "schema": SAFE_UPDATE.CONSERVATIVE_INPUTS_SCHEMA,
+                    "satisfied_gates": [],
+                    "operator_escalations": [],
+                    "verdict": "ready_for_operator_plan",
+                }
+            )
+
+    def test_gate_decision_digest_covers_input_parse_errors(self) -> None:
+        arguments = {
+            "core_candidate_lock": {
+                "status": "success",
+                "changed_packages": [],
+                "errors": [],
+            },
+            "installation_attestation_status": "success",
+            "authority_packages": [],
+            "authority_complete": False,
+            "inputs": {
+                "satisfied_gates": {
+                    "rollback-evidence": "sha256:" + "a" * 64,
+                },
+                "operator_escalations": set(),
+            },
+            "common": {
+                "generated_at": "2026-07-18T12:00:00+00:00",
+                **SAFE_UPDATE.safety_fields(),
+            },
+        }
+        without_detail, _ = SAFE_UPDATE.evaluate_conservative_gates(**arguments)
+        with_detail, _ = SAFE_UPDATE.evaluate_conservative_gates(
+            **arguments,
+            input_errors=["conservative inputs contain an unknown field"],
+        )
+
+        self.assertNotEqual(
+            without_detail["decision_digest"],
+            with_detail["decision_digest"],
+        )
+        self.assertIn(
+            "conservative inputs contain an unknown field",
+            with_detail["errors"],
+        )
+
+    def test_missing_rollback_evidence_blocks_the_authoritative_status(self) -> None:
+        self.conservative_inputs.write_text(
+            json.dumps(
+                {
+                    "schema": SAFE_UPDATE.CONSERVATIVE_INPUTS_SCHEMA,
+                    "satisfied_gates": [],
+                    "operator_escalations": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_simulation("--customizations", str(self.customizations))
+
+        self.assertEqual(result.returncode, 2)
+        gates = json.loads(
+            (self.root / "output" / "conservative-gates.json").read_text()
+        )
+        verdict = json.loads((self.root / "output" / "verdict.json").read_text())
+        self.assertEqual(gates["status"], "failed")
+        self.assertIn("rollback-evidence", gates["required_gates"])
+        self.assertEqual(verdict["verdict"], "blocked")
+        self.assertEqual(
+            verdict["decision_content"]["evidence_status"]["conservative_gates"],
+            "failed",
+        )
+
+    def test_bounded_human_report_cannot_replace_lossless_authority_input(self) -> None:
+        values = [f"package/dist/member-{index}.js" for index in range(251)]
+        human_report = SAFE_UPDATE.bounded(values)
+        self.assertTrue(human_report["truncated"])
+        self.assertEqual(len(human_report["members"]), SAFE_UPDATE.DIFF_MEMBER_LIMIT)
+
+        report, status = SAFE_UPDATE.evaluate_conservative_gates(
+            core_candidate_lock={
+                "status": "success",
+                "changed_packages": [],
+                "errors": [],
+            },
+            installation_attestation_status="success",
+            authority_packages=[],
+            authority_complete=False,
+            inputs={
+                "satisfied_gates": {
+                    "rollback-evidence": "sha256:" + "a" * 64,
+                },
+                "operator_escalations": set(),
+            },
+            common={
+                "generated_at": "2026-07-18T12:00:00+00:00",
+                **SAFE_UPDATE.safety_fields(),
+            },
+        )
+
+        self.assertEqual(status, "failed")
+        self.assertIn(
+            "authority-input-lossless: hard-blocking deterministic condition",
+            report["errors"],
+        )
+
+    def test_resolved_closure_drift_is_never_classified_fast(self) -> None:
+        report, status = SAFE_UPDATE.evaluate_conservative_gates(
+            core_candidate_lock={
+                "status": "success",
+                "changed_packages": [
+                    {
+                        "name": "@example/message-codec",
+                        "current_flags": {"optional": False},
+                        "target_flags": {"optional": False},
+                        "current_selectors": {"os": [], "cpu": [], "libc": []},
+                        "target_selectors": {"os": [], "cpu": [], "libc": []},
+                        "current_selected": True,
+                        "target_selected": True,
+                    }
+                ],
+                "errors": [],
+            },
+            installation_attestation_status="success",
+            authority_packages=[],
+            authority_complete=True,
+            inputs={
+                "satisfied_gates": {
+                    "rollback-evidence": "sha256:" + "a" * 64,
+                },
+                "operator_escalations": set(),
+            },
+            common={
+                "generated_at": "2026-07-18T12:00:00+00:00",
+                **SAFE_UPDATE.safety_fields(),
+            },
+        )
+
+        self.assertEqual(status, "success")
+        self.assertEqual(report["handling"], "conservative")
+        self.assertNotIn("fast", SAFE_UPDATE.GATE_HANDLING)
 
     def test_missing_customization_manifest_blocks_and_keeps_artifacts(self) -> None:
         result = self.run_simulation()

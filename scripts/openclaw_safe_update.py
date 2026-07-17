@@ -66,6 +66,7 @@ DECISION_FIELDS = frozenset(
         "verdict",
         "reason_code",
         "evidence_status",
+        "gate_decision",
         "candidate_roots",
         "production_apply_allowed",
         "operator_approval",
@@ -79,6 +80,7 @@ EVIDENCE_STATUS_FIELDS = frozenset(
         "core_candidate_lock",
         "installation_candidate_lock",
         "installation_attestation",
+        "conservative_gates",
         "synthetic_update",
         "customization_compatibility",
         "installation_coverage",
@@ -142,6 +144,39 @@ SERVICE_POINTER_DIRECTIVES = (
     b"EnvironmentFile=",
 )
 MAX_SERVICE_UNIT_BYTES = 64 * 1024
+CONSERVATIVE_INPUTS_SCHEMA = "openclaw.safe_update.conservative_inputs.v1"
+CONSERVATIVE_GATES_SCHEMA = "openclaw.safe_update.conservative_gates.v1"
+GATE_HANDLING = {"baseline", "conservative", "blocked"}
+GATE_EVIDENCE_IDS = frozenset(
+    {
+        "lifecycle-download-evidence",
+        "state-migration-rehearsal",
+        "rollback-evidence",
+        "plugin-sdk-contract",
+        "launcher-service-contract",
+        "permissions-contract",
+        "protocol-contract",
+        "channel-crypto-contract",
+        "environment-matched-rehearsal",
+    }
+)
+CONSERVATIVE_CONDITION_IDS = frozenset(
+    {
+        "candidate-closure-resolved",
+        "installation-attestation-fresh-complete",
+        "authority-input-lossless",
+        "lifecycle-download-evidence",
+        "state-migration-rehearsal",
+        "rollback-evidence",
+        "plugin-sdk-contract",
+        "launcher-service-contract",
+        "permissions-contract",
+        "protocol-contract",
+        "channel-crypto-contract",
+        "environment-matched-rehearsal",
+        "native-optional-dependency-known",
+    }
+)
 
 
 class RehearsalError(RuntimeError):
@@ -195,6 +230,7 @@ def build_status(
     reason: str,
     reason_code: str,
     evidence_status: dict[str, str],
+    gate_decision: dict[str, Any],
     candidate_roots: dict[str, str | None],
     evidence_bundle: dict[str, str],
     next_step: str,
@@ -206,6 +242,7 @@ def build_status(
         "verdict": verdict,
         "reason_code": reason_code,
         "evidence_status": evidence_status,
+        "gate_decision": gate_decision,
         "candidate_roots": candidate_roots,
         "production_apply_allowed": False,
         "operator_approval": False,
@@ -314,6 +351,26 @@ def parse_status(value: Any) -> dict[str, Any]:
     evidence_values = set(decision["evidence_status"].values())
     if not evidence_values or not evidence_values <= {"success", "failed"}:
         raise RehearsalError("decision_content evidence_status is invalid")
+    gate_decision = decision.get("gate_decision")
+    if (
+        not isinstance(gate_decision, dict)
+        or set(gate_decision)
+        != {"status", "handling", "required_gates", "decision_digest"}
+        or gate_decision.get("status") not in {"success", "failed"}
+        or gate_decision.get("handling") not in GATE_HANDLING
+        or not isinstance(gate_decision.get("required_gates"), list)
+        or gate_decision["required_gates"] != sorted(gate_decision["required_gates"])
+        or any(gate not in GATE_EVIDENCE_IDS for gate in gate_decision["required_gates"])
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(gate_decision.get("decision_digest", "")),
+        )
+    ):
+        raise RehearsalError("decision_content gate_decision is invalid")
+    if decision["evidence_status"]["conservative_gates"] != gate_decision["status"]:
+        raise RehearsalError(
+            "decision_content gate_decision does not match conservative gate evidence"
+        )
     expected_reason_code = (
         "required_evidence_failed"
         if value["verdict"] == "blocked"
@@ -967,6 +1024,8 @@ def compare_core_closures(current: dict[str, Any], target: dict[str, Any]) -> li
                 "target_selected": after.get("selected_for_platform") if after else None,
                 "current_flags": before.get("flags") if before else None,
                 "target_flags": after.get("flags") if after else None,
+                "current_selectors": before.get("selectors") if before else None,
+                "target_selectors": after.get("selectors") if after else None,
             }
         )
     return changes
@@ -1157,17 +1216,262 @@ def bounded(values: list[str]) -> dict[str, Any]:
     }
 
 
-def compare_archives(current: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+def authority_archive_diff(
+    current: dict[str, Any],
+    target: dict[str, Any],
+) -> dict[str, list[str]]:
     current_files = current["file_hashes"]
     target_files = target["file_hashes"]
     current_names = set(current_files)
     target_names = set(target_files)
-    changed = sorted(name for name in current_names & target_names if current_files[name] != target_files[name])
     return {
-        "added": bounded(sorted(target_names - current_names)),
-        "removed": bounded(sorted(current_names - target_names)),
-        "changed": bounded(changed),
+        "added": sorted(target_names - current_names),
+        "removed": sorted(current_names - target_names),
+        "changed": sorted(
+            name
+            for name in current_names & target_names
+            if current_files[name] != target_files[name]
+        ),
     }
+
+
+def compare_archives(current: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    authority_diff = authority_archive_diff(current, target)
+    return {
+        field: bounded(authority_diff[field])
+        for field in ("added", "removed", "changed")
+    }
+
+
+def parse_conservative_inputs(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("schema") != CONSERVATIVE_INPUTS_SCHEMA:
+        raise RehearsalError(
+            f"conservative inputs schema must be {CONSERVATIVE_INPUTS_SCHEMA}"
+        )
+    if set(value) != {"schema", "satisfied_gates", "operator_escalations"}:
+        raise RehearsalError("conservative inputs contain unknown or missing fields")
+    satisfied = value.get("satisfied_gates")
+    escalations = value.get("operator_escalations")
+    if not isinstance(satisfied, list) or not isinstance(escalations, list):
+        raise RehearsalError("conservative input lists are invalid")
+    normalized_gates: dict[str, str] = {}
+    for item in satisfied:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"id", "evidence_digest"}
+            or item.get("id") not in GATE_EVIDENCE_IDS
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(item.get("evidence_digest", "")),
+            )
+            or item["id"] in normalized_gates
+        ):
+            raise RehearsalError("satisfied gate entry is invalid")
+        normalized_gates[item["id"]] = item["evidence_digest"]
+    if (
+        any(item not in CONSERVATIVE_CONDITION_IDS for item in escalations)
+        or escalations != sorted(set(escalations))
+    ):
+        raise RehearsalError("operator escalations are invalid or not canonical")
+    return {
+        "satisfied_gates": normalized_gates,
+        "operator_escalations": set(escalations),
+    }
+
+
+def empty_conservative_inputs() -> dict[str, Any]:
+    return {"satisfied_gates": {}, "operator_escalations": set()}
+
+
+def path_matches(path: str, *needles: str) -> bool:
+    lowered = path.lower()
+    return any(needle in lowered for needle in needles)
+
+
+def conservative_machine_conditions(
+    *,
+    core_candidate_lock: dict[str, Any],
+    installation_attestation_status: str,
+    authority_packages: list[dict[str, Any]],
+    authority_complete: bool,
+) -> dict[str, bool]:
+    changed_paths = sorted(
+        {
+            path
+            for package in authority_packages
+            for field in ("added", "removed", "changed")
+            for path in package["archive_diff"][field]
+        }
+    )
+    metadata_fields = {
+        field
+        for package in authority_packages
+        for field in package.get("metadata_changed_fields", [])
+    }
+    closure_changes = core_candidate_lock.get("changed_packages", [])
+    optional_or_native_unknown = any(
+        (
+            bool((change.get("current_flags") or {}).get("optional"))
+            or bool((change.get("target_flags") or {}).get("optional"))
+            or any(
+                (change.get(side) or {}).get(selector)
+                for side in ("current_selectors", "target_selectors")
+                for selector in ("os", "cpu", "libc")
+            )
+        )
+        and (
+            change.get("current_selected") is None
+            or change.get("target_selected") is None
+        )
+        for change in closure_changes
+    )
+    lifecycle_change = any(
+        finding.get("id") == "lifecycle-script-changed"
+        for package in authority_packages
+        for finding in package.get("risk_findings", [])
+    ) or any("install script" in error for error in core_candidate_lock.get("errors", []))
+    state_change = any(
+        path_matches(
+            path,
+            "/migration",
+            "/migrations",
+            "/schema",
+            "/queue",
+            "/crypto",
+            "/cipher",
+            "/keystore",
+        )
+        for path in changed_paths
+    )
+    plugin_sdk_change = any(
+        path_matches(path, "/plugin", "/sdk", "/abi", "/loader", "module-resolver")
+        for path in changed_paths
+    )
+    launcher_service_change = any(
+        path_matches(path, "/launcher", "/service", "/systemd", "/gateway", "/bin/")
+        for path in changed_paths
+    )
+    permissions_change = any(
+        path_matches(path, "/permission", "/authz", "/acl", "/capability")
+        for path in changed_paths
+    )
+    protocol_change = any(
+        path_matches(path, "/protocol", "/transport", "/wire")
+        for path in changed_paths
+    )
+    channel_crypto_change = any(
+        path_matches(path, "/signal", "/matrix", "/telegram", "/whatsapp")
+        and path_matches(path, "crypto", "encrypt", "e2e")
+        for path in changed_paths
+    )
+    return {
+        "candidate-closure-resolved": core_candidate_lock.get("status") != "success",
+        "installation-attestation-fresh-complete": (
+            installation_attestation_status != "success"
+        ),
+        "authority-input-lossless": not authority_complete,
+        "lifecycle-download-evidence": lifecycle_change,
+        "state-migration-rehearsal": state_change,
+        "rollback-evidence": True,
+        "plugin-sdk-contract": plugin_sdk_change,
+        "launcher-service-contract": launcher_service_change,
+        "permissions-contract": permissions_change,
+        "protocol-contract": protocol_change,
+        "channel-crypto-contract": channel_crypto_change,
+        "environment-matched-rehearsal": "engines" in metadata_fields,
+        "native-optional-dependency-known": optional_or_native_unknown,
+    }
+
+
+def evaluate_conservative_gates(
+    *,
+    core_candidate_lock: dict[str, Any],
+    installation_attestation_status: str,
+    authority_packages: list[dict[str, Any]],
+    authority_complete: bool,
+    inputs: dict[str, Any],
+    common: dict[str, Any],
+    input_errors: list[str] | None = None,
+) -> tuple[dict[str, Any], str]:
+    detected = conservative_machine_conditions(
+        core_candidate_lock=core_candidate_lock,
+        installation_attestation_status=installation_attestation_status,
+        authority_packages=authority_packages,
+        authority_complete=authority_complete,
+    )
+    escalations = inputs["operator_escalations"]
+    satisfied = inputs["satisfied_gates"]
+    hard_block_ids = {
+        "candidate-closure-resolved",
+        "installation-attestation-fresh-complete",
+        "authority-input-lossless",
+        "native-optional-dependency-known",
+    }
+    decisions: list[dict[str, Any]] = []
+    required_gates: set[str] = set()
+    errors: list[str] = list(input_errors or [])
+    conservative = bool(core_candidate_lock.get("changed_packages"))
+    for gate_id in sorted(CONSERVATIVE_CONDITION_IDS):
+        triggered = bool(detected[gate_id] or gate_id in escalations)
+        required_gate = gate_id if triggered and gate_id in GATE_EVIDENCE_IDS else None
+        if required_gate:
+            required_gates.add(required_gate)
+        if triggered and gate_id in hard_block_ids:
+            outcome = "blocked"
+            errors.append(f"{gate_id}: hard-blocking deterministic condition")
+        elif required_gate and required_gate not in satisfied:
+            outcome = "blocked"
+            errors.append(f"{gate_id}: required evidence is missing")
+        elif triggered:
+            outcome = "conservative"
+            conservative = True
+        else:
+            outcome = "pass"
+        decisions.append(
+            {
+                "id": gate_id,
+                "triggered": triggered,
+                "source": (
+                    "machine_and_operator"
+                    if detected[gate_id] and gate_id in escalations
+                    else "machine"
+                    if detected[gate_id]
+                    else "operator"
+                    if gate_id in escalations
+                    else "none"
+                ),
+                "outcome": outcome,
+                "required_gate": required_gate,
+                "evidence_digest": satisfied.get(required_gate) if required_gate else None,
+            }
+        )
+    decision_content = {
+        "schema": "openclaw.safe_update.conservative_gate_decision.v1",
+        "handling": (
+            "blocked" if errors else "conservative" if conservative else "baseline"
+        ),
+        "required_gates": sorted(required_gates),
+        "decisions": decisions,
+        "authority_digest": canonical_digest(authority_packages),
+        "errors": errors,
+    }
+    status = "failed" if errors else "success"
+    report = {
+        "schema": CONSERVATIVE_GATES_SCHEMA,
+        **common,
+        "status": status,
+        "handling": decision_content["handling"],
+        "authority_digest": decision_content["authority_digest"],
+        "decision_digest": canonical_digest(decision_content),
+        "required_gates": decision_content["required_gates"],
+        "satisfied_gates": [
+            {"id": gate_id, "evidence_digest": satisfied[gate_id]}
+            for gate_id in sorted(satisfied)
+        ],
+        "decisions": decisions,
+        "errors": errors,
+    }
+    return report, status
 
 
 def semver_tuple(value: str) -> tuple[int, int, int] | None:
@@ -2479,6 +2783,8 @@ def simulate(args: argparse.Namespace) -> int:
     common = {"generated_at": generated_at, **safety_fields()}
     runtime_errors: list[str] = []
     package_results: list[dict[str, Any]] = []
+    authority_packages: list[dict[str, Any]] = []
+    authority_complete = True
     target_archives: dict[str, tuple[Path, dict[str, Any], dict[str, Any]]] = {}
     coverage_profile, coverage_errors, coverage_mode = load_coverage(
         args.coverage.resolve() if args.coverage else None,
@@ -2550,6 +2856,17 @@ def simulate(args: argparse.Namespace) -> int:
                 target_inspection["package_json"],
                 runtime_node_version,
             )
+            authority_packages.append(
+                {
+                    "name": name,
+                    "archive_diff": authority_archive_diff(
+                        current_inspection,
+                        target_inspection,
+                    ),
+                    "metadata_changed_fields": package_metadata["changed_fields"],
+                    "risk_findings": package_metadata["risk_findings"],
+                }
+            )
             blocking_findings = [
                 finding
                 for finding in package_metadata["risk_findings"]
@@ -2579,6 +2896,7 @@ def simulate(args: argparse.Namespace) -> int:
             target_archives[name] = (target_path, target_inspection, target_metadata)
             package_result["errors"].extend(finding["detail"] for finding in blocking_findings)
         except (KeyError, RehearsalError, OSError, tarfile.TarError) as exc:
+            authority_complete = False
             package_result["errors"].append(str(exc))
         package_results.append(package_result)
 
@@ -2742,6 +3060,25 @@ def simulate(args: argparse.Namespace) -> int:
             installation_attestation_status = "success"
         except RehearsalError:
             pass
+    conservative_inputs = empty_conservative_inputs()
+    conservative_input_errors: list[str] = []
+    if args.conservative_inputs:
+        try:
+            conservative_inputs = parse_conservative_inputs(
+                read_json(args.conservative_inputs.resolve())
+            )
+        except RehearsalError as exc:
+            conservative_input_errors.append(str(exc))
+            authority_complete = False
+    conservative_gates, conservative_gate_status = evaluate_conservative_gates(
+        core_candidate_lock=core_candidate_lock,
+        installation_attestation_status=installation_attestation_status,
+        authority_packages=authority_packages,
+        authority_complete=authority_complete,
+        inputs=conservative_inputs,
+        common=common,
+        input_errors=conservative_input_errors,
+    )
     postcheck_plan = {
         "schema": "openclaw.safe_update.post_upgrade_e2e.v1",
         **common,
@@ -2766,6 +3103,7 @@ def simulate(args: argparse.Namespace) -> int:
     core_candidate_path = output_dir / "core-candidate-lock.json"
     installation_candidate_path = output_dir / "installation-candidate-lock.json"
     installation_attestation_path = output_dir / "installation-attestation.json"
+    conservative_gates_path = output_dir / "conservative-gates.json"
     synthetic_path = output_dir / "synthetic-update.json"
     customization_path = output_dir / "customization-compatibility.json"
     coverage_path = output_dir / "coverage-report.json"
@@ -2774,6 +3112,7 @@ def simulate(args: argparse.Namespace) -> int:
     write_json(core_candidate_path, core_candidate_lock)
     write_json(installation_candidate_path, installation_candidate_lock)
     write_json(installation_attestation_path, installation_attestation)
+    write_json(conservative_gates_path, conservative_gates)
     write_json(synthetic_path, synthetic)
     write_json(customization_path, customizations)
     write_json(coverage_path, coverage_report)
@@ -2786,6 +3125,7 @@ def simulate(args: argparse.Namespace) -> int:
             core_candidate_status,
             installation_candidate_status,
             installation_attestation_status,
+            conservative_gate_status,
             synthetic_status,
             customization_status,
             coverage_status,
@@ -2808,6 +3148,7 @@ def simulate(args: argparse.Namespace) -> int:
                 installation_attestation_path,
                 installation_attestation_status,
             ),
+            artifact_reference(conservative_gates_path, conservative_gate_status),
             artifact_reference(synthetic_path, synthetic_status),
             artifact_reference(customization_path, customization_status),
             artifact_reference(coverage_path, coverage_status),
@@ -2830,10 +3171,17 @@ def simulate(args: argparse.Namespace) -> int:
             "core_candidate_lock": core_candidate_status,
             "installation_candidate_lock": installation_candidate_status,
             "installation_attestation": installation_attestation_status,
+            "conservative_gates": conservative_gate_status,
             "synthetic_update": synthetic_status,
             "customization_compatibility": customization_status,
             "installation_coverage": coverage_status,
             "post_upgrade_e2e_plan": postcheck_plan["status"],
+        },
+        gate_decision={
+            "status": conservative_gate_status,
+            "handling": conservative_gates["handling"],
+            "required_gates": conservative_gates["required_gates"],
+            "decision_digest": conservative_gates["decision_digest"],
         },
         candidate_roots={
             "current": installation_candidate_lock["current_root"],
@@ -2862,6 +3210,7 @@ def simulate(args: argparse.Namespace) -> int:
         f"- Current candidate root: `{installation_candidate_lock['current_root'] or 'unavailable'}`\n"
         f"- Target candidate root: `{installation_candidate_lock['target_root'] or 'unavailable'}`\n"
         f"- Installation attestation: `{installation_attestation_status}`\n"
+        f"- Conservative gates: `{conservative_gate_status}` (`{conservative_gates['handling']}`)\n"
         f"- Evidence bundle: `{evidence_path.name}` (`{digest_file(evidence_path)}`)\n"
         f"- Post-upgrade E2E plan: `{postcheck_path.name}`\n\n"
         "## Required operator inputs\n\n"
@@ -2883,6 +3232,7 @@ def simulate(args: argparse.Namespace) -> int:
         f"- Core candidate lock: `{core_candidate_status}`\n"
         f"- Installation candidate lock: `{installation_candidate_status}`\n"
         f"- Installation attestation: `{installation_attestation_status}`\n"
+        f"- Conservative gates: `{conservative_gate_status}` (`{conservative_gates['handling']}`)\n"
         f"- Package evidence: `{synthetic_status}`\n"
         f"- Customization evidence: `{customization_status}`\n"
         f"- Installation coverage: `{coverage_status}`\n"
@@ -2939,6 +3289,7 @@ def parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--coverage", type=Path)
     simulate_parser.add_argument("--installation-contract", type=Path)
     simulate_parser.add_argument("--installation-attestation", type=Path)
+    simulate_parser.add_argument("--conservative-inputs", type=Path)
     simulate_parser.add_argument("--allow-no-coverage", action="store_true")
     simulate_parser.add_argument("--runtime-node-version")
     simulate_parser.add_argument("--runtime-os")

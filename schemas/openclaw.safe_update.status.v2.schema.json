@@ -172,6 +172,7 @@
         "verdict",
         "reason_code",
         "evidence_status",
+        "gate_decision",
         "candidate_roots",
         "production_apply_allowed",
         "operator_approval",
@@ -204,6 +205,7 @@
             "core_candidate_lock",
             "installation_candidate_lock",
             "installation_attestation",
+            "conservative_gates",
             "synthetic_update",
             "customization_compatibility",
             "installation_coverage",
@@ -229,6 +231,12 @@
               ]
             },
             "installation_attestation": {
+              "enum": [
+                "success",
+                "failed"
+              ]
+            },
+            "conservative_gates": {
               "enum": [
                 "success",
                 "failed"
@@ -261,6 +269,9 @@
           },
           "additionalProperties": false
         },
+        "gate_decision": {
+          "$ref": "#/$defs/gateDecision"
+        },
         "candidate_roots": {
           "$ref": "#/$defs/candidateRoots"
         },
@@ -278,6 +289,52 @@
             "repair_and_rerun",
             "prepare_operator_plan"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "gateDecision": {
+      "type": "object",
+      "required": [
+        "status",
+        "handling",
+        "required_gates",
+        "decision_digest"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "success",
+            "failed"
+          ]
+        },
+        "handling": {
+          "enum": [
+            "baseline",
+            "conservative",
+            "blocked"
+          ]
+        },
+        "required_gates": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "lifecycle-download-evidence",
+              "state-migration-rehearsal",
+              "rollback-evidence",
+              "plugin-sdk-contract",
+              "launcher-service-contract",
+              "permissions-contract",
+              "protocol-contract",
+              "channel-crypto-contract",
+              "environment-matched-rehearsal"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "decision_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
         }
       },
       "additionalProperties": false
