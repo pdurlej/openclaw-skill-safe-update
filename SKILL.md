@@ -201,7 +201,31 @@ unit an explicit failure. Concurrency
 and timing never enter canonical evidence or verdicts; `1` preserves the full
 sequential path.
 
-For an independent model review, send only the generated sanitized summaries and public package diffs. Reviewer success does not change the verdict or grant approval.
+For an independent model review, prepare a digest-bound public-safe input:
+
+```bash
+python3 scripts/openclaw_advisory.py prepare \
+  --status artifacts/safe-update/verdict.json \
+  --evidence-bundle artifacts/safe-update/evidence-bundle.json \
+  --installation-candidate-lock artifacts/safe-update/installation-candidate-lock.json \
+  --synthetic-update artifacts/safe-update/synthetic-update.json \
+  --customization-compatibility artifacts/safe-update/customization-compatibility.json \
+  --impact-shadow artifacts/safe-update/impact-shadow.json \
+  --output artifacts/advisory-input.json
+
+python3 scripts/openclaw_advisory.py render-prompt \
+  --input artifacts/advisory-input.json \
+  --output artifacts/advisory-prompt.md
+```
+
+After a reviewer returns one JSON object, validate it with
+`openclaw_advisory.py validate`. The result is an optional attachment only.
+Workers may add namespaced hypotheses, checks, risks, and review requests.
+They may not establish an unaffected surface, waive evidence, emit a verdict,
+mutate canonical status, or enter the analysis cache. Missing, malformed,
+timed-out, conflicting, or digest-mismatched output has no status effect.
+Agreement between workers is not confidence. Do not send raw package prose,
+private configuration, conversations, secrets, or production logs.
 
 ## GitHub Workflow
 

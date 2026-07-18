@@ -83,6 +83,25 @@ runs in a killable subprocess, so a timeout cannot produce a late cache write; w
 count and timing never enter `decision_content`, `decision_digest`, or
 `evidence-bundle.json`.
 
+`advisory-input.json`, `advisory-result.json`, and
+`advisory-attachment.json` are optional, public-safe, non-authoritative
+artifacts produced outside `simulate`. The input verifies the status-bound
+evidence bundle, binds the target candidate and exact source artifact digests,
+baseline check definitions, bounded structural facts, and fixed output limits.
+It excludes raw package prose. Evidence references resolve only against the
+digest-bound advisory input content, not arbitrary source paths. A result is
+accepted only when its input digest, source references, namespace, shape,
+byte size, collection and text limits, and immutable false authority flags
+validate. Existing archive inspection already supplies decompressed-byte,
+member-count, duplicate-path, parser-time, and nesting limits before these
+facts are prepared. A suggested check that
+collides with a baseline ID must reproduce the baseline definition and
+evidence digests exactly; otherwise it is rejected. Accepted advisory output
+has `canonical_status_effect: none`. Missing, malformed, timed-out,
+conflicting, or digest-mismatched output cannot change canonical status,
+remove evidence, improve a verdict, or enter the analysis cache. Worker
+agreement carries no confidence semantics.
+
 `synthetic-update.json` records archive safety, package identity, bounded added, removed, and changed member lists, plus current-to-target changes in Node engines, dependencies, optional and peer dependencies, lifecycle scripts, and executable declarations. Changed lifecycle scripts and incompatible or unproven Node requirements block the rehearsal.
 
 `customization-compatibility.json` records every requested customization check and its result. Missing members, unreadable text, or absent anchors fail closed.

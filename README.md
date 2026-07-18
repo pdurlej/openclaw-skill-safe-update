@@ -239,6 +239,41 @@ existing evidence path. Each inspection runs in a killable subprocess so a
 timeout cannot continue writing cache state after the result. Worker counts and durations live only in
 `archive-execution.json`; they never enter canonical evidence or decisions.
 
+### Optional advisory review
+
+An external model can review only the sanitized structural facts after the
+deterministic rehearsal has finished:
+
+```bash
+python3 scripts/openclaw_advisory.py prepare \
+  --status artifacts/safe-update/verdict.json \
+  --evidence-bundle artifacts/safe-update/evidence-bundle.json \
+  --installation-candidate-lock artifacts/safe-update/installation-candidate-lock.json \
+  --synthetic-update artifacts/safe-update/synthetic-update.json \
+  --customization-compatibility artifacts/safe-update/customization-compatibility.json \
+  --impact-shadow artifacts/safe-update/impact-shadow.json \
+  --output artifacts/advisory-input.json
+
+python3 scripts/openclaw_advisory.py render-prompt \
+  --input artifacts/advisory-input.json \
+  --output artifacts/advisory-prompt.md
+
+python3 scripts/openclaw_advisory.py validate \
+  --input artifacts/advisory-input.json \
+  --result artifacts/advisory-result.json \
+  --output artifacts/advisory-attachment.json
+```
+
+The adapter does not call a model or write externally. `advisory-input.json`
+contains package identities, metadata field names, archive member paths,
+deterministic risk classes, and source digests, but no raw package prose.
+Accepted results are namespaced, digest-bound attachments with
+`authoritative=false` and `canonical_status_effect=none`. Missing, malformed,
+timed-out, conflicting, or digest-mismatched results leave `verdict.json`
+unchanged. Agreement between workers is not confidence, and advisory output
+cannot establish “unaffected,” waive a check, emit a verdict, or enter the
+analysis cache.
+
 The gate tells you **what is at risk, which evidence failed, and what still must
 be proven**. It deliberately does not prescribe how to rewrite every local
 integration. That repair belongs to the owner of the installation.
@@ -291,10 +326,9 @@ The first stable lane targets npm-global OpenClaw installations on Linux. Other
 installation shapes should arrive as explicit adapters rather than pretending
 the same rollback and activation rules fit every runtime.
 
-Version 1.1 keeps analysis deterministic and single-process. Parallel workers
-for packages, channels, MCPs, memory, providers, and services are planned for
-1.2, with one deterministic aggregator retaining ownership of the final
-verdict.
+The authoritative analysis remains deterministic. Bounded subprocess workers
+parallelize only pure archive inspection, while optional model reviewers stay
+outside the verdict path and may only add advisory hypotheses or checks.
 
 This is an independent community project and is not an official OpenClaw
 release or endorsement.
