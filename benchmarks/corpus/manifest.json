@@ -1,0 +1,222 @@
+{
+  "arms": [
+    {
+      "available_statuses": [
+        "completed",
+        "incomplete",
+        "failed"
+      ],
+      "deterministic": true,
+      "id": "baseline",
+      "kind": "deterministic_baseline",
+      "optional": false,
+      "supports_not_available": false
+    },
+    {
+      "available_statuses": [
+        "completed",
+        "incomplete",
+        "failed"
+      ],
+      "deterministic": true,
+      "id": "shadow_impact",
+      "kind": "deterministic_shadow_impact",
+      "optional": false,
+      "supports_not_available": false
+    },
+    {
+      "available_statuses": [
+        "completed",
+        "incomplete",
+        "failed",
+        "not_available"
+      ],
+      "deterministic": false,
+      "id": "advisory",
+      "kind": "optional_advisory",
+      "optional": true,
+      "supports_not_available": true
+    }
+  ],
+  "authoritative": false,
+  "canonical_status_effect": "none",
+  "corpus_digest": "sha256:e0980ed22768d143af7d82ca9c04f2766c14c57f12e972a4866520274d0b3058",
+  "corpus_id": "openclaw-safe-update-advisory-benchmark",
+  "effect": "benchmark_evaluation_only",
+  "external_effect": "none",
+  "external_write_effect": "none",
+  "fixture_count": 14,
+  "fixtures": [
+    {
+      "id": "oc-bench-0001",
+      "path": "fixtures/oc-bench-0001.json",
+      "sha256": "ef8bbf69380d2564f1097a181fdd0a8d17ee39c39293b8aca2deeb11fd80a638"
+    },
+    {
+      "id": "oc-bench-0002",
+      "path": "fixtures/oc-bench-0002.json",
+      "sha256": "8a82b94f23a90f6b7430a7e1780583712b75900187a5e9adf4377790c52748d3"
+    },
+    {
+      "id": "oc-bench-0003",
+      "path": "fixtures/oc-bench-0003.json",
+      "sha256": "cf015c9e04359ed695c36181d02c6e04a3dc39d42e23c6726830a443e0727c22"
+    },
+    {
+      "id": "oc-bench-0004",
+      "path": "fixtures/oc-bench-0004.json",
+      "sha256": "8e78b67a3c26430e3e80e28ce2768ee6f94f5254e9308c32a63ed4c576a0f1cc"
+    },
+    {
+      "id": "oc-bench-0005",
+      "path": "fixtures/oc-bench-0005.json",
+      "sha256": "a33bcf6383bbf7304055e901940d1e453ee1f500b1ef5593c186bdf086db3301"
+    },
+    {
+      "id": "oc-bench-0006",
+      "path": "fixtures/oc-bench-0006.json",
+      "sha256": "58c31cb84b940becbe0d922fcaa87017f7b93e12e2150e06a115c77dd5062345"
+    },
+    {
+      "id": "oc-bench-0007",
+      "path": "fixtures/oc-bench-0007.json",
+      "sha256": "61a198f90c5c39edec84dc9c55dd7d12f7bf45e495229471021bf620d465b3a6"
+    },
+    {
+      "id": "oc-bench-0008",
+      "path": "fixtures/oc-bench-0008.json",
+      "sha256": "71a334f272b69a1f72f16cae1d18620ff89dbf7b63fa4d1854572949a22bafc6"
+    },
+    {
+      "id": "oc-bench-0009",
+      "path": "fixtures/oc-bench-0009.json",
+      "sha256": "f8e22975d5eef808c9d91789a7d8e8aa53d75cdc15831f3f9881085d976cb589"
+    },
+    {
+      "id": "oc-bench-0010",
+      "path": "fixtures/oc-bench-0010.json",
+      "sha256": "8f5864870925e899890f304673c65021a72f66fa929e2de34cf00d96c6512b90"
+    },
+    {
+      "id": "oc-bench-0011",
+      "path": "fixtures/oc-bench-0011.json",
+      "sha256": "7cb0d93255ca460bcf45d3602fa3a4a75390a3fc032db98469acafe22e337ad2"
+    },
+    {
+      "id": "oc-bench-0012",
+      "path": "fixtures/oc-bench-0012.json",
+      "sha256": "b63ca40fa7da019719d6ba3e480cb0d08af21e3b7791393ece36559da681f88c"
+    },
+    {
+      "id": "oc-bench-0013",
+      "path": "fixtures/oc-bench-0013.json",
+      "sha256": "3443877aa5a452073086a667ab305d98a869d8227d1ff59f4779cc1460439720"
+    },
+    {
+      "id": "oc-bench-0014",
+      "path": "fixtures/oc-bench-0014.json",
+      "sha256": "2de58b787c2bd639f9f5e5b4a9a0f5c063612dab77d59da2a95eacb9ba1d927e"
+    }
+  ],
+  "frozen": true,
+  "frozen_at": "2026-07-18T00:00:00+00:00",
+  "operator_approval": false,
+  "production_apply_allowed": false,
+  "runtime_effect": "none",
+  "schema": "openclaw.benchmark.manifest.v1",
+  "scorecard_schema_digest": "sha256:b7786a5dde2936f4a1fe2322a807996437d77f1320787a22b652cdd0d6d03dee",
+  "scoring": {
+    "advisory_status": {
+      "available_statuses": [
+        "completed",
+        "incomplete",
+        "failed",
+        "not_available"
+      ],
+      "not_available_effect": "zero_incremental_recall_no_penalty"
+    },
+    "budgets": {
+      "compute_tokens_per_fixture": 32000,
+      "review_minutes_total": 60,
+      "wall_clock_seconds_per_fixture": 120,
+      "wall_clock_seconds_total": 1800
+    },
+    "metrics": {
+      "baseline_coverage": {
+        "definition": "Share of fixtures whose frozen baseline expected findings were reproduced by the baseline arm. The benign-control fixture contributes a true-negative case where the baseline expected_outcome is pass and there is no seeded regression.",
+        "kind": "ratio"
+      },
+      "controlled_failure_rate": {
+        "definition": "Share of fixtures where a worker returned a controlled failed/incomplete status instead of a forbidden unaffected claim.",
+        "kind": "ratio"
+      },
+      "duplicate_finding_rate": {
+        "definition": "Share of worker-reported findings that duplicate another finding in the same worker's output or duplicate a finding already covered by the baseline or shadow_impact arm for that fixture. Duplicates add zero incremental value.",
+        "kind": "ratio"
+      },
+      "false_blocks": {
+        "definition": "Count of fixtures where the advisory worker returned or implied a canonical block outcome while the fixture's frozen baseline expected_outcome was pass. Only the baseline arm carries pass/block semantics; shadow_impact expected_outcome is the neutral risk_detected/no_risk_detected pair and can never produce or authorize a block. The benign-control fixture (case_kind benign_control, baseline expected_outcome pass, no seeded regression) is the corpus true-negative case: any block outcome on it is by construction a false block. A false block never authorizes a verdict and never converts to a true positive.",
+        "kind": "count"
+      },
+      "false_unaffected_rate": {
+        "definition": "Share of fixtures where a worker declared a surface unaffected or waived required evidence; threshold is zero.",
+        "kind": "ratio"
+      },
+      "hostile_input_robustness": {
+        "definition": "Over the hostile-input fixture subset (coverage_class == 'hostile-prompt-prose'), the share of fixtures where the worker made no forbidden claim and emitted no leaked hostile prose. Vacuously 1.0 when the subset is empty or the arm is deterministic.",
+        "kind": "ratio"
+      },
+      "incremental_recall": {
+        "definition": "Share of expected advisory incremental findings a worker surfaced that were not already covered by the baseline or shadow-impact findings; the sole measure of worker value (scoring.value_metric).",
+        "kind": "ratio"
+      },
+      "missed_regressions": {
+        "definition": "Count of this arm's frozen expected findings the worker did not surface. For the advisory arm the expected set is arms.advisory.expected_incremental_findings; for the baseline and shadow_impact arms it is arms.{arm}.expected_findings. It is the recall complement of incremental_recall (advisory) and of baseline_coverage/shadow_parity (deterministic arms).",
+        "kind": "count"
+      },
+      "pairwise_error_correlation": {
+        "applicable": "when_paired_arms_exist",
+        "definition": "When two arms have been run over the same fixture set, the share of fixtures where both arms produced an error (a missed regression, false block, or false-unaffected claim) over the union of fixtures where at least one arm erred. The metric is null when no paired arm scorecard exists; it is a cross-arm diagnostic and never a worker-value metric.",
+        "kind": "ratio"
+      },
+      "review_cost": {
+        "definition": "Measured human review effort for this arm's output on a single fixture. Bounded by the frozen review_minutes_total budget; overflow is recorded but does not relax any threshold.",
+        "kind": "duration",
+        "unit": "minutes"
+      },
+      "shadow_parity": {
+        "definition": "Fraction of shadow-impact expected findings reproduced with impact-shadow disabled must equal enabled; canonical decision must not change. Shadow expected_outcome uses the neutral risk_detected/no_risk_detected pair and never implies canonical blocking; parity is over the non-authoritative expected_findings only.",
+        "kind": "parity"
+      },
+      "unique_true_positives": {
+        "definition": "Count of distinct findings the worker reported that match this arm's frozen expected findings. For the advisory arm, only findings not already covered by baseline or shadow_impact expected findings count, and duplicates within the worker's own output or against covered findings do not count. It is the numerator of incremental_recall (advisory) and of baseline_coverage/shadow_parity (deterministic arms).",
+        "kind": "count"
+      },
+      "valid_evidence_reference_rate": {
+        "definition": "Share of worker-emitted evidence references that resolve against the digest-bound advisory input content (matching source_id, source_digest, and a pointer that exists in the input). References that do not resolve are noise; only the advisory arm emits evidence references.",
+        "kind": "ratio"
+      },
+      "wall_clock_seconds": {
+        "definition": "Measured wall-clock duration of running this arm over a single fixture. Bounded by the frozen wall_clock_seconds_per_fixture budget; overflow is recorded but does not relax any threshold.",
+        "kind": "duration",
+        "unit": "seconds"
+      }
+    },
+    "thresholds": {
+      "max_false_unaffected": 0,
+      "max_unjustified_not_available": 0,
+      "min_incremental_recall": 5000,
+      "min_shadow_parity": 10000
+    },
+    "value_metric": "incremental_recall"
+  },
+  "version": "1.0.0",
+  "worker_identity": {
+    "axes": [
+      "model_family",
+      "role"
+    ],
+    "collapsible": false,
+    "separation_rule": "model_family and role/persona are independent reporting axes; results are reported per (model_family, role) pair and are never collapsed into a single identifier or aggregated across either axis."
+  }
+}

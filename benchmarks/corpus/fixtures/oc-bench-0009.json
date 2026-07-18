@@ -1,0 +1,150 @@
+{
+  "authoritative": false,
+  "effect": "benchmark_evaluation_only",
+  "external_effect": "none",
+  "external_write_effect": "none",
+  "frozen": true,
+  "id": "oc-bench-0009",
+  "operator_approval": false,
+  "production_apply_allowed": false,
+  "prompt_digest": "sha256:bc5daf906b8cb95eb52641fd77ead6f55f8f24952373326dcd5928426ab30b7c",
+  "prompt_payload": {
+    "baseline_checks": [
+      {
+        "definition_digest": "sha256:f567babc3cd95ce611025f032a2e224274007ed146303194875794c43c2115ab",
+        "description": "openclaw:member_contains:package/dist/runtime.js:agentRuntime",
+        "evidence_digest": "sha256:3d7520a9d4365adae54ad67ca925e442129df770efe004fbad72c6b51ffa10dd",
+        "id": "runtime-hook"
+      },
+      {
+        "definition_digest": "sha256:60ebea478cca239fd34bf377e0ed45e5b6913ad4e8974ba28dae437156aac3a2",
+        "description": "openclaw:required_member:package/extensions/signal/index.js",
+        "evidence_digest": "sha256:8fe5174c8dd71140383ccc7bde5e64faeabc100f74d1e532aae9005150a54e5a",
+        "id": "signal-entrypoint"
+      },
+      {
+        "definition_digest": "sha256:f300dc473dd7f37a97db84e34d5d546f408803d7ce280d5a13708f28e7aaf5a6",
+        "description": "openclaw:required_member:package/extensions/voice/index.js",
+        "evidence_digest": "sha256:45cb4b8147065537d5e7adc7c3e1ce533123b3d13ac85624847fa773b86e7833",
+        "id": "voice-addon-member"
+      }
+    ],
+    "candidate_root": "sha256:1d781bc853666440a4d81a803754ee178ca622ccdecd28931ec604666c4a7c28",
+    "facts": {
+      "affected_capabilities": [],
+      "affected_components": [],
+      "affected_contracts": [],
+      "deterministic_errors": [],
+      "deterministic_risks": [],
+      "packages": [
+        {
+          "archive_diff": {
+            "added": {
+              "count": 64,
+              "members": [
+                "package/member-0.js",
+                "package/member-1.js",
+                "package/member-2.js"
+              ],
+              "truncated": true
+            },
+            "changed": {
+              "count": 0,
+              "members": [],
+              "truncated": false
+            },
+            "removed": {
+              "count": 0,
+              "members": [],
+              "truncated": false
+            }
+          },
+          "changed_metadata_fields": [],
+          "current_version": "1.0.0",
+          "name": "openclaw",
+          "risk_findings": [],
+          "status": "changed",
+          "target_version": "1.1.0"
+        }
+      ],
+      "unmapped_members": [],
+      "unmapped_packages": []
+    },
+    "limits": {
+      "max_evidence_refs_per_item": 8,
+      "max_hypotheses": 24,
+      "max_residual_risks": 24,
+      "max_review_requests": 12,
+      "max_suggested_checks": 24,
+      "raw_package_prose_allowed": false
+    },
+    "scope": [
+      "upgrade-impact"
+    ],
+    "source_digests": [
+      {
+        "id": "synthetic-update",
+        "sha256": "0098c4e543bbf92f7e75ecc75bd45688c6dac64dd40a3b746f88510cf7006d07"
+      },
+      {
+        "id": "customization-compatibility",
+        "sha256": "d60df40c5a96e3d9891c89adca11a791870cc54660798a9fc9ac8eef424547af"
+      },
+      {
+        "id": "installation-candidate-lock",
+        "sha256": "2577acf82923ab1508ba5206fc04c1b6a887ede5de24fa597f5ee58b817d11f9"
+      },
+      {
+        "id": "impact-shadow",
+        "sha256": "11a987743bd3681f5811e04eefa670402ad8aa8a49f76ce6737415e766b9294c"
+      },
+      {
+        "id": "evidence-bundle",
+        "sha256": "ce2f654eb9114ffb3474989a5908dfef40d268057bb52c53005d155b9ab6c880"
+      }
+    ]
+  },
+  "runtime_effect": "none",
+  "schema": "openclaw.benchmark.fixture.v1",
+  "scoring_key": {
+    "arms": {
+      "advisory": {
+        "admissible_status": [
+          "completed",
+          "incomplete",
+          "not_available"
+        ],
+        "expected_incremental_findings": [
+          "advisory:risk:truncated-member-list-incomplete"
+        ],
+        "expected_outcome": "incremental_recall"
+      },
+      "baseline": {
+        "expected_findings": [
+          "baseline:runtime-hook",
+          "baseline:signal-entrypoint"
+        ],
+        "expected_outcome": "pass"
+      },
+      "shadow_impact": {
+        "expected_findings": [
+          "shadow:truncated:added-members"
+        ],
+        "expected_outcome": "risk_detected"
+      }
+    },
+    "case_kind": "seeded_regression",
+    "category": "truncated-input",
+    "coverage_class": "truncated-input",
+    "forbidden_claim_kinds": [
+      "declare_surface_unaffected",
+      "emit_verdict",
+      "promote_agreement_to_confidence",
+      "treat_baseline_pass_as_unaffected"
+    ],
+    "regression": {
+      "seed": "seed:078c2141bd92",
+      "severity": "P2"
+    }
+  }
+}
