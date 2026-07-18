@@ -147,6 +147,7 @@ python3 scripts/openclaw_safe_update.py simulate \
   --installation-contract artifacts/installation-contract.json \
   --installation-attestation artifacts/installation-attestation.json \
   --conservative-inputs artifacts/conservative-inputs.json \
+  --cache-dir .openclaw-safe-update/cache \
   --output-dir artifacts/safe-update
 ```
 
@@ -186,6 +187,7 @@ protection this project exists to provide.
 | `installation-attestation.json` | Fresh public-safe comparison of observed local components and service config pointers with the composed current root |
 | `conservative-gates.json` | Lossless deterministic classification of unknown, migration, rollback, environment, protocol, and contract risk |
 | `impact-shadow.json` | Non-authoritative mapping from closed-candidate changes to components, capabilities, contracts, hypothetical checks, and unmapped paths |
+| `analysis-cache.json` | Non-authoritative full input digest plus per-namespace hit, miss, and ignored-entry provenance |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
 | `coverage-report.json` | Whether every required installation surface is represented and bound to evidence |
@@ -215,6 +217,17 @@ policy could add, risks it would flag, and paths it cannot map, but
 must produce the same complete canonical decision, digest, required evidence,
 and verdict. Shadow output is not included in the authoritative evidence
 bundle and cannot block or improve status.
+
+`--cache-dir` enables content-addressed caches for pure archive, contract,
+deterministic policy, and optional shadow analysis. Keys bind analyzer and
+policy versions plus the relevant exact inputs. The full input digest also
+binds deterministic core, package, coverage, and customization analysis so
+runtime-only changes cannot remain invisible. The cache root and entries must
+be private to the current user; entries are authenticated with a cache-local
+integrity key and symlinks or permissive filesystem modes disable reuse.
+Corrupt, tampered, partial, stale, or version-mismatched entries are ignored
+and recomputed. Cache provenance, timings, and hit counts stay outside
+canonical decision content and cannot change a verdict.
 
 The gate tells you **what is at risk, which evidence failed, and what still must
 be proven**. It deliberately does not prescribe how to rewrite every local

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import hmac
 import json
 import os
 import platform
@@ -148,6 +149,20 @@ CONSERVATIVE_INPUTS_SCHEMA = "openclaw.safe_update.conservative_inputs.v1"
 CONSERVATIVE_GATES_SCHEMA = "openclaw.safe_update.conservative_gates.v1"
 IMPACT_SHADOW_SCHEMA = "openclaw.safe_update.impact_shadow.v1"
 SHADOW_ID_PREFIX = "shadow:"
+ANALYSIS_CACHE_SCHEMA = "openclaw.safe_update.analysis_cache.v1"
+ANALYSIS_CACHE_ENTRY_SCHEMA = "openclaw.safe_update.analysis_cache_entry.v1"
+ANALYZER_VERSION = "openclaw-safe-update.py:v1.3"
+DETERMINISTIC_POLICY_VERSION = "conservative-gates:v1"
+CACHE_NAMESPACES = {"archive", "contract", "policy", "shadow"}
+VOLATILE_ANALYSIS_FIELDS = {
+    "generated_at",
+    "effect",
+    "runtime_effect",
+    "external_effect",
+    "external_write_effect",
+    "production_apply_allowed",
+    "operator_approval",
+}
 GATE_HANDLING = {"baseline", "conservative", "blocked"}
 GATE_EVIDENCE_IDS = frozenset(
     {
@@ -211,6 +226,210 @@ def canonical_json_bytes(value: Any) -> bytes:
 
 def canonical_digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def deterministic_analysis_value(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item
+        for key, item in value.items()
+        if key not in VOLATILE_ANALYSIS_FIELDS
+    }
+
+
+def secure_cache_namespace(
+    cache_dir: Path,
+    namespace: str,
+) -> tuple[Path, bytes] | None:
+    try:
+        cache_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        root_stat = cache_dir.lstat()
+        if (
+            not stat.S_ISDIR(root_stat.st_mode)
+            or cache_dir.is_symlink()
+            or root_stat.st_uid != os.getuid()
+            or stat.S_IMODE(root_stat.st_mode) & 0o077
+        ):
+            return None
+
+        key_path = cache_dir / ".integrity-key"
+        if not key_path.exists():
+            try:
+                descriptor = os.open(
+                    key_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+            except FileExistsError:
+                pass
+            else:
+                with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+                    handle.write(os.urandom(32).hex())
+                    handle.flush()
+                    os.fsync(handle.fileno())
+        key_stat = key_path.lstat()
+        if (
+            not stat.S_ISREG(key_stat.st_mode)
+            or key_path.is_symlink()
+            or key_stat.st_uid != os.getuid()
+            or stat.S_IMODE(key_stat.st_mode) & 0o077
+        ):
+            return None
+        key = bytes.fromhex(key_path.read_text(encoding="ascii"))
+        if len(key) != 32:
+            return None
+
+        namespace_dir = cache_dir / namespace
+        namespace_dir.mkdir(mode=0o700, exist_ok=True)
+        namespace_stat = namespace_dir.lstat()
+        if (
+            not stat.S_ISDIR(namespace_stat.st_mode)
+            or namespace_dir.is_symlink()
+            or namespace_stat.st_uid != os.getuid()
+            or stat.S_IMODE(namespace_stat.st_mode) & 0o077
+        ):
+            return None
+        return namespace_dir, key
+    except (OSError, ValueError):
+        return None
+
+
+def cache_entry_mac(key: bytes, entry: dict[str, Any]) -> str:
+    return hmac.new(key, canonical_json_bytes(entry), hashlib.sha256).hexdigest()
+
+
+def cached_analysis(
+    *,
+    cache_dir: Path | None,
+    namespace: str,
+    key_material: Any,
+    provenance: list[dict[str, str]],
+    build: Any,
+    validate: Any | None = None,
+) -> Any:
+    if namespace not in CACHE_NAMESPACES:
+        raise RehearsalError(f"unsupported cache namespace: {namespace}")
+    key = canonical_digest(
+        {
+            "namespace": namespace,
+            "analyzer_version": ANALYZER_VERSION,
+            "policy_version": DETERMINISTIC_POLICY_VERSION,
+            "input": key_material,
+        }
+    )
+    if cache_dir is not None:
+        secure_namespace = secure_cache_namespace(cache_dir, namespace)
+        if secure_namespace is None:
+            provenance.append(
+                {"namespace": namespace, "key": key, "result": "ignored"}
+            )
+            return build()
+        namespace_dir, integrity_key = secure_namespace
+        entry_path = namespace_dir / f"{key.removeprefix('sha256:')}.json"
+        if entry_path.is_file():
+            try:
+                entry_stat = entry_path.lstat()
+                if (
+                    not stat.S_ISREG(entry_stat.st_mode)
+                    or entry_path.is_symlink()
+                    or entry_stat.st_uid != os.getuid()
+                    or stat.S_IMODE(entry_stat.st_mode) & 0o077
+                ):
+                    raise RehearsalError("cache entry permissions are unsafe")
+                entry = read_json(entry_path)
+                if (
+                    not isinstance(entry, dict)
+                    or set(entry)
+                    != {
+                        "schema",
+                        "namespace",
+                        "key",
+                        "analyzer_version",
+                        "policy_version",
+                        "payload",
+                        "payload_digest",
+                        "mac",
+                    }
+                    or entry.get("schema") != ANALYSIS_CACHE_ENTRY_SCHEMA
+                    or entry.get("namespace") != namespace
+                    or entry.get("key") != key
+                    or entry.get("analyzer_version") != ANALYZER_VERSION
+                    or entry.get("policy_version") != DETERMINISTIC_POLICY_VERSION
+                    or entry.get("payload_digest")
+                    != canonical_digest(entry.get("payload"))
+                    or not hmac.compare_digest(
+                        str(entry.get("mac")),
+                        cache_entry_mac(
+                            integrity_key,
+                            {
+                                entry_key: entry_value
+                                for entry_key, entry_value in entry.items()
+                                if entry_key != "mac"
+                            },
+                        ),
+                    )
+                ):
+                    raise RehearsalError("cache entry validation failed")
+                if validate is not None and not validate(entry["payload"]):
+                    raise RehearsalError("cache payload validation failed")
+                provenance.append(
+                    {"namespace": namespace, "key": key, "result": "hit"}
+                )
+                return entry["payload"]
+            except RehearsalError:
+                provenance.append(
+                    {"namespace": namespace, "key": key, "result": "ignored"}
+                )
+        payload = build()
+        if validate is not None and not validate(payload):
+            raise RehearsalError("analysis payload validation failed")
+        entry = {
+            "schema": ANALYSIS_CACHE_ENTRY_SCHEMA,
+            "namespace": namespace,
+            "key": key,
+            "analyzer_version": ANALYZER_VERSION,
+            "policy_version": DETERMINISTIC_POLICY_VERSION,
+            "payload": payload,
+            "payload_digest": canonical_digest(payload),
+        }
+        entry["mac"] = cache_entry_mac(integrity_key, entry)
+        write_json(entry_path, entry)
+        entry_path.chmod(0o600)
+        provenance.append(
+            {"namespace": namespace, "key": key, "result": "miss"}
+        )
+        return payload
+    provenance.append({"namespace": namespace, "key": key, "result": "disabled"})
+    return build()
+
+
+def build_rehearsal_input(
+    *,
+    candidate_roots: dict[str, str | None],
+    installation_contract: dict[str, Any],
+    installation_attestation: dict[str, Any],
+    conservative_inputs: dict[str, Any],
+    authoritative_analysis: dict[str, Any],
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": "openclaw.safe_update.rehearsal_input.v1",
+        "candidate_roots": candidate_roots,
+        "installation_contract_digest": (
+            canonical_digest(installation_contract)
+            if installation_contract
+            else None
+        ),
+        "installation_attestation_digest": canonical_digest(
+            installation_attestation
+        ),
+        "conservative_inputs": conservative_inputs,
+        "authoritative_analysis_digest": canonical_digest(
+            authoritative_analysis
+        ),
+        "policy_version": DETERMINISTIC_POLICY_VERSION,
+        "analyzer_version": ANALYZER_VERSION,
+        "options": options,
+    }
 
 
 def legacy_verdict_payload(status: dict[str, Any]) -> dict[str, Any]:
@@ -1203,6 +1422,44 @@ def verify_archive(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
     return inspected
 
 
+def verify_archive_cached(
+    path: Path,
+    metadata: dict[str, Any],
+    cache_dir: Path | None,
+    provenance: list[dict[str, str]],
+) -> dict[str, Any]:
+    if not path.is_file():
+        raise RehearsalError(f"archive is missing: {path}")
+    key_material = {
+        "archive_sha256": digest_file(path),
+        "archive_sha1": digest_file(path, "sha1"),
+        "metadata": metadata,
+    }
+    inspected = cached_analysis(
+        cache_dir=cache_dir,
+        namespace="archive",
+        key_material=key_material,
+        provenance=provenance,
+        build=lambda: verify_archive(path, metadata),
+        validate=lambda payload: (
+            isinstance(payload, dict)
+            and isinstance(payload.get("package_json"), dict)
+            and payload["package_json"].get("name") == metadata.get("name")
+            and payload["package_json"].get("version") == metadata.get("version")
+            and isinstance(payload.get("file_hashes"), dict)
+        ),
+    )
+    package_json = inspected.get("package_json") if isinstance(inspected, dict) else None
+    if (
+        not isinstance(package_json, dict)
+        or package_json.get("name") != metadata.get("name")
+        or package_json.get("version") != metadata.get("version")
+        or not isinstance(inspected.get("file_hashes"), dict)
+    ):
+        raise RehearsalError(f"cached archive analysis is invalid for {path.name}")
+    return inspected
+
+
 def archive_path(input_dir: Path, lane: str, metadata: dict[str, Any]) -> Path:
     filename = metadata.get("archive")
     if not isinstance(filename, str) or not filename or PurePosixPath(filename).name != filename:
@@ -1394,8 +1651,9 @@ def evaluate_conservative_gates(
     inputs: dict[str, Any],
     common: dict[str, Any],
     input_errors: list[str] | None = None,
+    machine_conditions: dict[str, bool] | None = None,
 ) -> tuple[dict[str, Any], str]:
-    detected = conservative_machine_conditions(
+    detected = machine_conditions or conservative_machine_conditions(
         core_candidate_lock=core_candidate_lock,
         installation_attestation_status=installation_attestation_status,
         authority_packages=authority_packages,
@@ -2974,6 +3232,8 @@ def simulate(args: argparse.Namespace) -> int:
     metadata_path = input_dir / "input-metadata.json"
     generated_at = now_iso()
     common = {"generated_at": generated_at, **safety_fields()}
+    cache_dir = args.cache_dir.resolve() if args.cache_dir else None
+    cache_provenance: list[dict[str, str]] = []
     runtime_errors: list[str] = []
     package_results: list[dict[str, Any]] = []
     authority_packages: list[dict[str, Any]] = []
@@ -3042,8 +3302,18 @@ def simulate(args: argparse.Namespace) -> int:
                 raise RehearsalError(f"package metadata name mismatch for {name}")
             current_path = archive_path(input_dir, "current", current_metadata)
             target_path = archive_path(input_dir, "target", target_metadata)
-            current_inspection = verify_archive(current_path, current_metadata)
-            target_inspection = verify_archive(target_path, target_metadata)
+            current_inspection = verify_archive_cached(
+                current_path,
+                current_metadata,
+                cache_dir,
+                cache_provenance,
+            )
+            target_inspection = verify_archive_cached(
+                target_path,
+                target_metadata,
+                cache_dir,
+                cache_provenance,
+            )
             package_metadata = compare_package_metadata(
                 current_inspection["package_json"],
                 target_inspection["package_json"],
@@ -3208,13 +3478,23 @@ def simulate(args: argparse.Namespace) -> int:
     installation_contract: dict[str, Any] = {}
     try:
         if args.installation_contract:
-            installation_contract = canonical_installation_contract(
-                read_json(args.installation_contract.resolve())
+            raw_installation_contract = read_json(
+                args.installation_contract.resolve()
             )
         else:
-            installation_contract = canonical_installation_contract(
-                adapt_v1_installation_contract(checks, coverage_profile)
+            raw_installation_contract = adapt_v1_installation_contract(
+                checks,
+                coverage_profile,
             )
+        installation_contract = cached_analysis(
+            cache_dir=cache_dir,
+            namespace="contract",
+            key_material=raw_installation_contract,
+            provenance=cache_provenance,
+            build=lambda: canonical_installation_contract(
+                raw_installation_contract
+            ),
+        )
     except RehearsalError as exc:
         installation_contract_errors.append(str(exc))
     if installation_contract_errors:
@@ -3263,6 +3543,30 @@ def simulate(args: argparse.Namespace) -> int:
         except RehearsalError as exc:
             conservative_input_errors.append(str(exc))
             authority_complete = False
+    machine_conditions = cached_analysis(
+        cache_dir=cache_dir,
+        namespace="policy",
+        key_material={
+            "core_candidate_lock": deterministic_analysis_value(
+                core_candidate_lock
+            ),
+            "installation_attestation_status": installation_attestation_status,
+            "authority_packages": authority_packages,
+            "authority_complete": authority_complete,
+        },
+        provenance=cache_provenance,
+        build=lambda: conservative_machine_conditions(
+            core_candidate_lock=core_candidate_lock,
+            installation_attestation_status=installation_attestation_status,
+            authority_packages=authority_packages,
+            authority_complete=authority_complete,
+        ),
+        validate=lambda payload: (
+            isinstance(payload, dict)
+            and set(payload) == CONSERVATIVE_CONDITION_IDS
+            and all(isinstance(value, bool) for value in payload.values())
+        ),
+    )
     conservative_gates, conservative_gate_status = evaluate_conservative_gates(
         core_candidate_lock=core_candidate_lock,
         installation_attestation_status=installation_attestation_status,
@@ -3271,17 +3575,92 @@ def simulate(args: argparse.Namespace) -> int:
         inputs=conservative_inputs,
         common=common,
         input_errors=conservative_input_errors,
+        machine_conditions=machine_conditions,
     )
     impact_shadow = None
     if not args.disable_impact_shadow:
-        impact_shadow = build_impact_shadow(
-            authority_packages=authority_packages,
-            core_candidate_lock=core_candidate_lock,
-            installation_contract=installation_contract,
-            baseline_check_ids={item["id"] for item in checks},
-            authority_complete=authority_complete,
-            common=common,
+        shadow_payload = cached_analysis(
+            cache_dir=cache_dir,
+            namespace="shadow",
+            key_material={
+                "authority_packages": authority_packages,
+                "core_candidate_lock": deterministic_analysis_value(
+                    core_candidate_lock
+                ),
+                "installation_contract": installation_contract,
+                "baseline_check_ids": sorted(item["id"] for item in checks),
+                "authority_complete": authority_complete,
+            },
+            provenance=cache_provenance,
+            build=lambda: {
+                key: value
+                for key, value in build_impact_shadow(
+                    authority_packages=authority_packages,
+                    core_candidate_lock=core_candidate_lock,
+                    installation_contract=installation_contract,
+                    baseline_check_ids={item["id"] for item in checks},
+                    authority_complete=authority_complete,
+                    common=common,
+                ).items()
+                if key not in {"schema", *VOLATILE_ANALYSIS_FIELDS}
+            },
         )
+        impact_shadow = {
+            "schema": IMPACT_SHADOW_SCHEMA,
+            **common,
+            **shadow_payload,
+        }
+    normalized_conservative_inputs = {
+        "satisfied_gates": [
+            {"id": gate_id, "evidence_digest": digest}
+            for gate_id, digest in sorted(
+                conservative_inputs["satisfied_gates"].items()
+            )
+        ],
+        "operator_escalations": sorted(
+            conservative_inputs["operator_escalations"]
+        ),
+    }
+    rehearsal_input = build_rehearsal_input(
+        candidate_roots={
+            "current": installation_candidate_lock.get("current_root"),
+            "target": installation_candidate_lock.get("target_root"),
+        },
+        installation_contract=installation_contract,
+        installation_attestation=installation_attestation,
+        conservative_inputs=normalized_conservative_inputs,
+        authoritative_analysis={
+            "core_candidate_lock": deterministic_analysis_value(
+                core_candidate_lock
+            ),
+            "authority_packages": authority_packages,
+            "coverage_profile": coverage_profile,
+            "customization_checks": checks,
+        },
+        options={
+            "allow_no_customizations": bool(args.allow_no_customizations),
+            "allow_no_coverage": bool(args.allow_no_coverage),
+            "impact_shadow_enabled": not args.disable_impact_shadow,
+            "coverage_mode": coverage_mode,
+            "customization_mode": customization_mode,
+        },
+    )
+    analysis_cache_report = {
+        "schema": ANALYSIS_CACHE_SCHEMA,
+        **common,
+        "authoritative": False,
+        "cache_enabled": cache_dir is not None,
+        "rehearsal_input_digest": canonical_digest(rehearsal_input),
+        "analyzer_version": ANALYZER_VERSION,
+        "policy_version": DETERMINISTIC_POLICY_VERSION,
+        "entries": cache_provenance,
+        "counts": {
+            result: sum(
+                1 for item in cache_provenance if item["result"] == result
+            )
+            for result in ("hit", "miss", "ignored", "disabled")
+        },
+    }
     postcheck_plan = {
         "schema": "openclaw.safe_update.post_upgrade_e2e.v1",
         **common,
@@ -3308,6 +3687,7 @@ def simulate(args: argparse.Namespace) -> int:
     installation_attestation_path = output_dir / "installation-attestation.json"
     conservative_gates_path = output_dir / "conservative-gates.json"
     impact_shadow_path = output_dir / "impact-shadow.json"
+    analysis_cache_path = output_dir / "analysis-cache.json"
     synthetic_path = output_dir / "synthetic-update.json"
     customization_path = output_dir / "customization-compatibility.json"
     coverage_path = output_dir / "coverage-report.json"
@@ -3319,6 +3699,7 @@ def simulate(args: argparse.Namespace) -> int:
     write_json(conservative_gates_path, conservative_gates)
     if impact_shadow is not None:
         write_json(impact_shadow_path, impact_shadow)
+    write_json(analysis_cache_path, analysis_cache_report)
     write_json(synthetic_path, synthetic)
     write_json(customization_path, customizations)
     write_json(coverage_path, coverage_report)
@@ -3497,6 +3878,7 @@ def parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--installation-attestation", type=Path)
     simulate_parser.add_argument("--conservative-inputs", type=Path)
     simulate_parser.add_argument("--disable-impact-shadow", action="store_true")
+    simulate_parser.add_argument("--cache-dir", type=Path)
     simulate_parser.add_argument("--allow-no-coverage", action="store_true")
     simulate_parser.add_argument("--runtime-node-version")
     simulate_parser.add_argument("--runtime-os")

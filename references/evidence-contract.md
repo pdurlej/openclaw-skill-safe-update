@@ -63,6 +63,18 @@ artifact or running with `--disable-impact-shadow` leaves the canonical
 decision content, digest, required evidence, and verdict unchanged. It is not
 part of `evidence-bundle.json`.
 
+`analysis-cache.json` records a canonical rehearsal-input digest and
+content-addressed cache provenance for the `archive`, `contract`, `policy`, and
+`shadow` namespaces. The full digest binds composed candidate roots,
+installation contract, attestation, conservative inputs, deterministic policy,
+analyzer version, semantic options, and deterministic core, package, coverage,
+and customization analysis. Cache hits and misses are operational
+metadata outside canonical decision content. The cache root is private to the
+current user, entries are authenticated with a cache-local integrity key, and
+unsafe filesystem ownership, permissions, or symlinks disable reuse. Corrupt,
+tampered, partial, stale, or version-mismatched entries are ignored and
+recomputed; no worker or external review output is cacheable authority.
+
 `synthetic-update.json` records archive safety, package identity, bounded added, removed, and changed member lists, plus current-to-target changes in Node engines, dependencies, optional and peer dependencies, lifecycle scripts, and executable declarations. Changed lifecycle scripts and incompatible or unproven Node requirements block the rehearsal.
 
 `customization-compatibility.json` records every requested customization check and its result. Missing members, unreadable text, or absent anchors fail closed.

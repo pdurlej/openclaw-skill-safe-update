@@ -40,6 +40,9 @@ CONSERVATIVE_INPUTS_SCHEMA = (
 IMPACT_SHADOW_SCHEMA = (
     ROOT / "schemas" / "openclaw.safe_update.impact_shadow.v1.schema.json"
 )
+ANALYSIS_CACHE_SCHEMA = (
+    ROOT / "schemas" / "openclaw.safe_update.analysis_cache.v1.schema.json"
+)
 BASELINE = ROOT / "references" / "v1.1-baseline.json"
 SIGNAL_VOICE_CONTRACT = ROOT / "examples" / "signal-voice.installation-contract.json"
 COMPOSED_INSTALLATION_CONTRACT = (
@@ -328,12 +331,14 @@ class SafeUpdateTest(unittest.TestCase):
         *extra: str,
         include_attestation: bool = True,
         output_dir: Path | None = None,
+        cache_dir: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         attestation_args = (
             ["--installation-attestation", str(self.attestation)]
             if include_attestation
             else []
         )
+        cache_args = ["--cache-dir", str(cache_dir)] if cache_dir else []
         return subprocess.run(
             [
                 sys.executable,
@@ -347,6 +352,7 @@ class SafeUpdateTest(unittest.TestCase):
                 str(self.coverage),
                 "--conservative-inputs",
                 str(self.conservative_inputs),
+                *cache_args,
                 *attestation_args,
                 *extra,
             ],
@@ -816,6 +822,7 @@ class SafeUpdateTest(unittest.TestCase):
         gate_schema = json.loads(CONSERVATIVE_GATES_SCHEMA.read_text())
         input_schema = json.loads(CONSERVATIVE_INPUTS_SCHEMA.read_text())
         impact_schema = json.loads(IMPACT_SHADOW_SCHEMA.read_text())
+        cache_schema = json.loads(ANALYSIS_CACHE_SCHEMA.read_text())
         self.assertEqual(
             gate_schema["properties"]["schema"]["const"],
             SAFE_UPDATE.CONSERVATIVE_GATES_SCHEMA,
@@ -836,6 +843,12 @@ class SafeUpdateTest(unittest.TestCase):
             0,
         )
         self.assertFalse(impact_schema["additionalProperties"])
+        self.assertEqual(
+            cache_schema["properties"]["schema"]["const"],
+            SAFE_UPDATE.ANALYSIS_CACHE_SCHEMA,
+        )
+        self.assertFalse(cache_schema["properties"]["authoritative"]["const"])
+        self.assertFalse(cache_schema["additionalProperties"])
         self.assertEqual(baseline["commit"], BASELINE_SHA)
         self.assertEqual(baseline["test_case_count"], 13)
         self.assertEqual(baseline["test_cases"], BASELINE_TEST_CASES)
@@ -1520,6 +1533,289 @@ class SafeUpdateTest(unittest.TestCase):
             "package/extensions/signal/index.js",
             {item["member"] for item in shadow["unmapped_members"]},
         )
+
+    def test_analysis_cache_cold_and_warm_runs_are_decision_equivalent(self) -> None:
+        cache = self.root / "analysis-cache-store"
+        cold_output = self.root / "cache-cold"
+        warm_output = self.root / "cache-warm"
+
+        cold = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=cold_output,
+            cache_dir=cache,
+        )
+        warm = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=warm_output,
+            cache_dir=cache,
+        )
+
+        self.assertEqual(cold.returncode, 0, cold.stderr)
+        self.assertEqual(warm.returncode, 0, warm.stderr)
+        cold_status = json.loads((cold_output / "verdict.json").read_text())
+        warm_status = json.loads((warm_output / "verdict.json").read_text())
+        cold_cache = json.loads((cold_output / "analysis-cache.json").read_text())
+        warm_cache = json.loads((warm_output / "analysis-cache.json").read_text())
+        self.assertEqual(cold_status["decision_content"], warm_status["decision_content"])
+        self.assertEqual(cold_status["decision_digest"], warm_status["decision_digest"])
+        self.assertEqual(cold_status["verdict"], warm_status["verdict"])
+        self.assertGreater(cold_cache["counts"]["miss"], 0)
+        self.assertEqual(cold_cache["counts"]["hit"], 0)
+        self.assertGreater(warm_cache["counts"]["hit"], 0)
+        self.assertEqual(warm_cache["counts"]["miss"], 0)
+        self.assertEqual(
+            cold_cache["rehearsal_input_digest"],
+            warm_cache["rehearsal_input_digest"],
+        )
+        self.assertNotIn("analysis_cache", cold_status["decision_content"])
+        self.assertTrue(
+            {
+                item["namespace"]
+                for item in warm_cache["entries"]
+            }
+            <= SAFE_UPDATE.CACHE_NAMESPACES
+        )
+
+    def test_corrupt_cache_entry_is_ignored_and_recomputed(self) -> None:
+        cache = self.root / "corrupt-cache-store"
+        cold_output = self.root / "corrupt-cache-cold"
+        warm_output = self.root / "corrupt-cache-warm"
+        cold = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=cold_output,
+            cache_dir=cache,
+        )
+        self.assertEqual(cold.returncode, 0, cold.stderr)
+        archive_entry = next((cache / "archive").glob("*.json"))
+        archive_entry.write_text('{"schema":"partial"}\n', encoding="utf-8")
+
+        warm = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=warm_output,
+            cache_dir=cache,
+        )
+
+        self.assertEqual(warm.returncode, 0, warm.stderr)
+        cold_status = json.loads((cold_output / "verdict.json").read_text())
+        warm_status = json.loads((warm_output / "verdict.json").read_text())
+        report = json.loads((warm_output / "analysis-cache.json").read_text())
+        self.assertEqual(cold_status["decision_digest"], warm_status["decision_digest"])
+        self.assertEqual(cold_status["verdict"], warm_status["verdict"])
+        self.assertEqual(report["counts"]["ignored"], 1)
+        self.assertEqual(report["counts"]["miss"], 1)
+
+    def test_rehashed_but_unauthenticated_cache_tampering_is_ignored(self) -> None:
+        cache = self.root / "tampered-cache-store"
+        cold_output = self.root / "tampered-cache-cold"
+        warm_output = self.root / "tampered-cache-warm"
+        cold = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=cold_output,
+            cache_dir=cache,
+        )
+        self.assertEqual(cold.returncode, 0, cold.stderr)
+        policy_entry_path = next((cache / "policy").glob("*.json"))
+        policy_entry = json.loads(policy_entry_path.read_text())
+        policy_entry["payload"] = {
+            condition_id: False
+            for condition_id in SAFE_UPDATE.CONSERVATIVE_CONDITION_IDS
+        }
+        policy_entry["payload_digest"] = SAFE_UPDATE.canonical_digest(
+            policy_entry["payload"]
+        )
+        policy_entry_path.write_text(
+            json.dumps(policy_entry),
+            encoding="utf-8",
+        )
+
+        warm = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=warm_output,
+            cache_dir=cache,
+        )
+
+        self.assertEqual(warm.returncode, 0, warm.stderr)
+        cold_status = json.loads((cold_output / "verdict.json").read_text())
+        warm_status = json.loads((warm_output / "verdict.json").read_text())
+        report = json.loads((warm_output / "analysis-cache.json").read_text())
+        self.assertEqual(cold_status["decision_digest"], warm_status["decision_digest"])
+        self.assertEqual(cold_status["verdict"], warm_status["verdict"])
+        self.assertTrue(
+            any(
+                item["namespace"] == "policy" and item["result"] == "ignored"
+                for item in report["entries"]
+            )
+        )
+
+    def test_transitive_dependency_change_invalidates_policy_and_shadow_cache(
+        self,
+    ) -> None:
+        cache = self.root / "drift-cache-store"
+        first_output = self.root / "drift-cache-first"
+        second_output = self.root / "drift-cache-second"
+        first = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=first_output,
+            cache_dir=cache,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        metadata_path = self.input / "input-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["core_candidate"]["target"] = core_closure(
+            "1.1.0",
+            [("@example/message-codec", "3.5.0")],
+            root_integrity=integrity(self.target_archive),
+        )
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        second = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            output_dir=second_output,
+            cache_dir=cache,
+        )
+
+        self.assertEqual(second.returncode, 0, second.stderr)
+        first_cache = json.loads((first_output / "analysis-cache.json").read_text())
+        second_cache = json.loads((second_output / "analysis-cache.json").read_text())
+        results = {
+            (item["namespace"], item["result"])
+            for item in second_cache["entries"]
+        }
+        self.assertIn(("archive", "hit"), results)
+        self.assertIn(("contract", "hit"), results)
+        self.assertIn(("policy", "miss"), results)
+        self.assertIn(("shadow", "miss"), results)
+        self.assertNotEqual(
+            first_cache["rehearsal_input_digest"],
+            second_cache["rehearsal_input_digest"],
+        )
+
+    def test_cache_keys_invalidate_on_contract_policy_and_analyzer_change(self) -> None:
+        cache = self.root / "key-cache-store"
+        provenance: list[dict[str, str]] = []
+        first = SAFE_UPDATE.cached_analysis(
+            cache_dir=cache,
+            namespace="contract",
+            key_material={"contract": "v1"},
+            provenance=provenance,
+            build=lambda: {"value": 1},
+        )
+        second = SAFE_UPDATE.cached_analysis(
+            cache_dir=cache,
+            namespace="contract",
+            key_material={"contract": "v2"},
+            provenance=provenance,
+            build=lambda: {"value": 2},
+        )
+        with patch.object(
+            SAFE_UPDATE,
+            "DETERMINISTIC_POLICY_VERSION",
+            "conservative-gates:v2",
+        ):
+            policy = SAFE_UPDATE.cached_analysis(
+                cache_dir=cache,
+                namespace="contract",
+                key_material={"contract": "v1"},
+                provenance=provenance,
+                build=lambda: {"value": 3},
+            )
+        with patch.object(SAFE_UPDATE, "ANALYZER_VERSION", "analyzer:v2"):
+            analyzer = SAFE_UPDATE.cached_analysis(
+                cache_dir=cache,
+                namespace="contract",
+                key_material={"contract": "v1"},
+                provenance=provenance,
+                build=lambda: {"value": 4},
+            )
+
+        self.assertEqual(first, {"value": 1})
+        self.assertEqual(second, {"value": 2})
+        self.assertEqual(policy, {"value": 3})
+        self.assertEqual(analyzer, {"value": 4})
+        self.assertEqual(
+            [item["result"] for item in provenance],
+            ["miss", "miss", "miss", "miss"],
+        )
+
+    def test_rehearsal_input_digest_covers_every_authoritative_input_class(
+        self,
+    ) -> None:
+        arguments = {
+            "candidate_roots": {
+                "current": "sha256:" + "1" * 64,
+                "target": "sha256:" + "2" * 64,
+            },
+            "installation_contract": {"schema": "contract", "value": 1},
+            "installation_attestation": {"schema": "attestation", "value": 1},
+            "conservative_inputs": {
+                "satisfied_gates": [],
+                "operator_escalations": [],
+            },
+            "authoritative_analysis": {
+                "core_candidate_lock": {"status": "success"},
+                "authority_packages": [],
+                "coverage_profile": {"mode": "required"},
+                "customization_checks": [],
+            },
+            "options": {"impact_shadow_enabled": True},
+        }
+        baseline = SAFE_UPDATE.canonical_digest(
+            SAFE_UPDATE.build_rehearsal_input(**arguments)
+        )
+        mutations = [
+            {
+                **arguments,
+                "candidate_roots": {
+                    **arguments["candidate_roots"],
+                    "target": "sha256:" + "3" * 64,
+                },
+            },
+            {
+                **arguments,
+                "installation_contract": {"schema": "contract", "value": 2},
+            },
+            {
+                **arguments,
+                "installation_attestation": {
+                    "schema": "attestation",
+                    "value": 2,
+                },
+            },
+            {
+                **arguments,
+                "conservative_inputs": {
+                    "satisfied_gates": [],
+                    "operator_escalations": ["state-migration-rehearsal"],
+                },
+            },
+            {
+                **arguments,
+                "authoritative_analysis": {
+                    **arguments["authoritative_analysis"],
+                    "authority_packages": [{"name": "changed"}],
+                },
+            },
+            {
+                **arguments,
+                "options": {"impact_shadow_enabled": False},
+            },
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertNotEqual(
+                    baseline,
+                    SAFE_UPDATE.canonical_digest(
+                        SAFE_UPDATE.build_rehearsal_input(**mutation)
+                    ),
+                )
 
     def test_missing_customization_manifest_blocks_and_keeps_artifacts(self) -> None:
         result = self.run_simulation()
