@@ -75,6 +75,14 @@ unsafe filesystem ownership, permissions, or symlinks disable reuse. Corrupt,
 tampered, partial, stale, or version-mismatched entries are ignored and
 recomputed; no worker or external review output is cacheable authority.
 
+`archive-execution.json` is non-authoritative execution telemetry for pure
+archive analysis. It records the bounded worker count, configured timeout,
+input-ordered unit statuses, and wall-clock durations. A failed or timed-out
+unit still blocks through the existing runtime and package evidence. Each unit
+runs in a killable subprocess, so a timeout cannot produce a late cache write; worker
+count and timing never enter `decision_content`, `decision_digest`, or
+`evidence-bundle.json`.
+
 `synthetic-update.json` records archive safety, package identity, bounded added, removed, and changed member lists, plus current-to-target changes in Node engines, dependencies, optional and peer dependencies, lifecycle scripts, and executable declarations. Changed lifecycle scripts and incompatible or unproven Node requirements block the rehearsal.
 
 `customization-compatibility.json` records every requested customization check and its result. Missing members, unreadable text, or absent anchors fail closed.

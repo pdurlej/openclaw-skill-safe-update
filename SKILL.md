@@ -151,6 +151,7 @@ python3 scripts/openclaw_safe_update.py simulate \
   --installation-attestation artifacts/installation-attestation.json \
   --conservative-inputs .openclaw-safe-update/conservative-inputs.json \
   --cache-dir .openclaw-safe-update/cache \
+  --archive-workers 4 \
   --output-dir artifacts/safe-update
 ```
 
@@ -169,6 +170,7 @@ Inspect these artifacts:
 - `conservative-gates.json`
 - `impact-shadow.json` (non-authoritative and removable)
 - `analysis-cache.json` (non-authoritative input digest and cache provenance)
+- `archive-execution.json` (non-authoritative concurrency and timing telemetry)
 - `synthetic-update.json`
 - `customization-compatibility.json`
 - `coverage-report.json`
@@ -191,6 +193,13 @@ versions. Cache entries are private to the current user and authenticated with
 a cache-local integrity key; unsafe permissions or symlinks disable reuse.
 Ignore and recompute corrupt, tampered, or partial entries. Never treat cache
 provenance, timing, hit rate, or advisory model output as evidence.
+
+Use `--archive-workers 1..8` only to parallelize independent deterministic
+archive inspection. Results and errors are reassembled in input order, and
+`--archive-timeout-seconds` kills a slow inspection subprocess and makes the
+unit an explicit failure. Concurrency
+and timing never enter canonical evidence or verdicts; `1` preserves the full
+sequential path.
 
 For an independent model review, send only the generated sanitized summaries and public package diffs. Reviewer success does not change the verdict or grant approval.
 
