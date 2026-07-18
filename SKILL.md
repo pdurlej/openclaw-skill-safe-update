@@ -150,6 +150,7 @@ python3 scripts/openclaw_safe_update.py simulate \
   --installation-contract artifacts/installation-contract.json \
   --installation-attestation artifacts/installation-attestation.json \
   --conservative-inputs .openclaw-safe-update/conservative-inputs.json \
+  --cache-dir .openclaw-safe-update/cache \
   --output-dir artifacts/safe-update
 ```
 
@@ -167,6 +168,7 @@ Inspect these artifacts:
 - `installation-attestation.json`
 - `conservative-gates.json`
 - `impact-shadow.json` (non-authoritative and removable)
+- `analysis-cache.json` (non-authoritative input digest and cache provenance)
 - `synthetic-update.json`
 - `customization-compatibility.json`
 - `coverage-report.json`
@@ -182,6 +184,13 @@ If the verdict is `blocked`, report the failed evidence, affected surface, and w
 risks. It must never remove a baseline check, enter the evidence bundle, or
 change `decision_content`, `decision_digest`, required evidence, or verdict.
 Use `--disable-impact-shadow` to verify that parity.
+
+`--cache-dir` stores only pure archive, contract, deterministic policy, and
+shadow analyses. Cache entries bind exact inputs plus analyzer and policy
+versions. Cache entries are private to the current user and authenticated with
+a cache-local integrity key; unsafe permissions or symlinks disable reuse.
+Ignore and recompute corrupt, tampered, or partial entries. Never treat cache
+provenance, timing, hit rate, or advisory model output as evidence.
 
 For an independent model review, send only the generated sanitized summaries and public package diffs. Reviewer success does not change the verdict or grant approval.
 

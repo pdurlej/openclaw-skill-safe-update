@@ -150,6 +150,7 @@ jobs:
             artifacts/safe-update/installation-attestation.json
             artifacts/safe-update/conservative-gates.json
             artifacts/safe-update/impact-shadow.json
+            artifacts/safe-update/analysis-cache.json
             artifacts/safe-update/synthetic-update.json
             artifacts/safe-update/customization-compatibility.json
             artifacts/safe-update/coverage-report.json
