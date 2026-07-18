@@ -148,6 +148,7 @@ python3 scripts/openclaw_safe_update.py simulate \
   --installation-attestation artifacts/installation-attestation.json \
   --conservative-inputs artifacts/conservative-inputs.json \
   --cache-dir .openclaw-safe-update/cache \
+  --archive-workers 4 \
   --output-dir artifacts/safe-update
 ```
 
@@ -188,6 +189,7 @@ protection this project exists to provide.
 | `conservative-gates.json` | Lossless deterministic classification of unknown, migration, rollback, environment, protocol, and contract risk |
 | `impact-shadow.json` | Non-authoritative mapping from closed-candidate changes to components, capabilities, contracts, hypothetical checks, and unmapped paths |
 | `analysis-cache.json` | Non-authoritative full input digest plus per-namespace hit, miss, and ignored-entry provenance |
+| `archive-execution.json` | Non-authoritative worker count, per-archive status, timeout, and wall-clock telemetry |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
 | `coverage-report.json` | Whether every required installation surface is represented and bound to evidence |
@@ -228,6 +230,14 @@ integrity key and symlinks or permissive filesystem modes disable reuse.
 Corrupt, tampered, partial, stale, or version-mismatched entries are ignored
 and recomputed. Cache provenance, timings, and hit counts stay outside
 canonical decision content and cannot change a verdict.
+
+`--archive-workers` runs only independent deterministic archive inspections in
+parallel and is bounded to `1..8`; `1` preserves sequential execution.
+`--archive-timeout-seconds` defaults to `120`. Results are reassembled in input
+order, and a failed or timed-out unit is explicit and blocks through the same
+existing evidence path. Each inspection runs in a killable subprocess so a
+timeout cannot continue writing cache state after the result. Worker counts and durations live only in
+`archive-execution.json`; they never enter canonical evidence or decisions.
 
 The gate tells you **what is at risk, which evidence failed, and what still must
 be proven**. It deliberately does not prescribe how to rewrite every local

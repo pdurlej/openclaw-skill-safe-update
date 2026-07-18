@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -151,9 +153,11 @@ IMPACT_SHADOW_SCHEMA = "openclaw.safe_update.impact_shadow.v1"
 SHADOW_ID_PREFIX = "shadow:"
 ANALYSIS_CACHE_SCHEMA = "openclaw.safe_update.analysis_cache.v1"
 ANALYSIS_CACHE_ENTRY_SCHEMA = "openclaw.safe_update.analysis_cache_entry.v1"
+ARCHIVE_EXECUTION_SCHEMA = "openclaw.safe_update.archive_execution.v1"
 ANALYZER_VERSION = "openclaw-safe-update.py:v1.3"
 DETERMINISTIC_POLICY_VERSION = "conservative-gates:v1"
 CACHE_NAMESPACES = {"archive", "contract", "policy", "shadow"}
+MAX_ARCHIVE_WORKERS = 8
 VOLATILE_ANALYSIS_FIELDS = {
     "generated_at",
     "effect",
@@ -1458,6 +1462,193 @@ def verify_archive_cached(
     ):
         raise RehearsalError(f"cached archive analysis is invalid for {path.name}")
     return inspected
+
+
+def analyze_archive_unit(
+    task: dict[str, Any],
+    cache_dir: Path | None,
+    analyzer: Any = verify_archive_cached,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    provenance: list[dict[str, str]] = []
+    try:
+        inspection = analyzer(
+            task["path"],
+            task["metadata"],
+            cache_dir,
+            provenance,
+        )
+        return {
+            "task_id": task["task_id"],
+            "package": task["name"],
+            "lane": task["lane"],
+            "status": "success",
+            "inspection": inspection,
+            "error": None,
+            "cache_provenance": provenance,
+            "duration_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+    except (KeyError, RehearsalError, OSError, tarfile.TarError) as exc:
+        return {
+            "task_id": task["task_id"],
+            "package": task["name"],
+            "lane": task["lane"],
+            "status": "failed",
+            "inspection": None,
+            "error": str(exc),
+            "cache_provenance": provenance,
+            "duration_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+
+
+def archive_timeout_result(
+    task: dict[str, Any],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "task_id": task["task_id"],
+        "package": task["name"],
+        "lane": task["lane"],
+        "status": "timed_out",
+        "inspection": None,
+        "error": (
+            f"archive analysis timed out for {task['task_id']} "
+            f"after {timeout_seconds:g}s"
+        ),
+        "cache_provenance": [],
+        "duration_ms": round(timeout_seconds * 1000, 3),
+    }
+
+
+def run_archive_subprocess_unit(
+    task: dict[str, Any],
+    cache_dir: Path | None,
+    timeout_seconds: float,
+    command_override: list[str] | None = None,
+) -> dict[str, Any]:
+    command = command_override or [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "_analyze-archive",
+        "--task-id",
+        task["task_id"],
+        "--package",
+        task["name"],
+        "--lane",
+        task["lane"],
+        "--path",
+        str(task["path"]),
+        "--metadata-json",
+        json.dumps(task["metadata"], ensure_ascii=True, sort_keys=True),
+    ]
+    if command_override is None and cache_dir is not None:
+        command.extend(["--cache-dir", str(cache_dir)])
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return archive_timeout_result(task, timeout_seconds)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit {completed.returncode}"
+        return {
+            "task_id": task["task_id"],
+            "package": task["name"],
+            "lane": task["lane"],
+            "status": "failed",
+            "inspection": None,
+            "error": f"archive analysis subprocess failed: {detail}",
+            "cache_provenance": [],
+            "duration_ms": 0,
+        }
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        result = None
+    if (
+        not isinstance(result, dict)
+        or result.get("task_id") != task["task_id"]
+        or result.get("package") != task["name"]
+        or result.get("lane") != task["lane"]
+        or result.get("status") not in {"success", "failed"}
+        or not isinstance(result.get("cache_provenance"), list)
+        or not isinstance(result.get("duration_ms"), (int, float))
+    ):
+        return {
+            "task_id": task["task_id"],
+            "package": task["name"],
+            "lane": task["lane"],
+            "status": "failed",
+            "inspection": None,
+            "error": "archive analysis subprocess returned invalid output",
+            "cache_provenance": [],
+            "duration_ms": 0,
+        }
+    return result
+
+
+def execute_archive_analyses(
+    tasks: list[dict[str, Any]],
+    *,
+    cache_dir: Path | None,
+    workers: int,
+    timeout_seconds: float,
+    unit_runner: Any = run_archive_subprocess_unit,
+) -> list[dict[str, Any]]:
+    if workers < 1 or workers > MAX_ARCHIVE_WORKERS:
+        raise RehearsalError(
+            f"archive workers must be between 1 and {MAX_ARCHIVE_WORKERS}"
+        )
+    if timeout_seconds <= 0 or timeout_seconds > 900:
+        raise RehearsalError(
+            "archive timeout seconds must be greater than 0 and at most 900"
+        )
+    if not tasks:
+        return []
+    if cache_dir is not None and secure_cache_namespace(
+        cache_dir,
+        "archive",
+    ) is None:
+        cache_dir = None
+
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(workers, len(tasks)),
+        thread_name_prefix="safe-update-archive",
+    )
+    submissions = [
+        (
+            task,
+            executor.submit(unit_runner, task, cache_dir, timeout_seconds),
+        )
+        for task in tasks
+    ]
+    results: list[dict[str, Any]] = []
+    try:
+        for task, future in submissions:
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = {
+                    "task_id": task["task_id"],
+                    "package": task["name"],
+                    "lane": task["lane"],
+                    "status": "failed",
+                    "inspection": None,
+                    "error": (
+                        f"archive analysis failed for {task['task_id']}: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    "cache_provenance": [],
+                    "duration_ms": 0,
+                }
+            results.append(result)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+    return results
 
 
 def archive_path(input_dir: Path, lane: str, metadata: dict[str, Any]) -> Path:
@@ -3225,6 +3416,27 @@ def artifact_reference(path: Path, status: str) -> dict[str, Any]:
     return {"path": path.name, "sha256": digest_file(path), "status": status}
 
 
+def analyze_archive_command(args: argparse.Namespace) -> int:
+    try:
+        metadata = json.loads(args.metadata_json)
+    except json.JSONDecodeError as exc:
+        raise RehearsalError(f"invalid archive metadata JSON: {exc}") from exc
+    if not isinstance(metadata, dict):
+        raise RehearsalError("archive metadata must be an object")
+    result = analyze_archive_unit(
+        {
+            "task_id": args.task_id,
+            "name": args.package,
+            "lane": args.lane,
+            "path": args.path.resolve(),
+            "metadata": metadata,
+        },
+        args.cache_dir.resolve() if args.cache_dir else None,
+    )
+    print(json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
 def simulate(args: argparse.Namespace) -> int:
     input_dir = args.input_dir.resolve()
     output_dir = args.output_dir.resolve()
@@ -3284,7 +3496,9 @@ def simulate(args: argparse.Namespace) -> int:
         packages = []
 
     seen_packages: set[str] = set()
-    for entry in packages:
+    prepared_packages: list[dict[str, Any] | None] = []
+    archive_tasks: list[dict[str, Any]] = []
+    for package_index, entry in enumerate(packages):
         package_result: dict[str, Any] = {"status": "failed", "errors": []}
         try:
             if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
@@ -3302,18 +3516,77 @@ def simulate(args: argparse.Namespace) -> int:
                 raise RehearsalError(f"package metadata name mismatch for {name}")
             current_path = archive_path(input_dir, "current", current_metadata)
             target_path = archive_path(input_dir, "target", target_metadata)
-            current_inspection = verify_archive_cached(
-                current_path,
-                current_metadata,
-                cache_dir,
-                cache_provenance,
+            prepared_packages.append(
+                {
+                    "name": name,
+                    "current_metadata": current_metadata,
+                    "target_metadata": target_metadata,
+                    "current_path": current_path,
+                    "target_path": target_path,
+                }
             )
-            target_inspection = verify_archive_cached(
-                target_path,
-                target_metadata,
-                cache_dir,
-                cache_provenance,
+            for lane, path, package_metadata in (
+                ("current", current_path, current_metadata),
+                ("target", target_path, target_metadata),
+            ):
+                archive_tasks.append(
+                    {
+                        "task_id": f"{package_index}:{name}:{lane}",
+                        "package_index": package_index,
+                        "name": name,
+                        "lane": lane,
+                        "path": path,
+                        "metadata": package_metadata,
+                    }
+                )
+        except (KeyError, RehearsalError, OSError) as exc:
+            authority_complete = False
+            package_result["errors"].append(str(exc))
+            prepared_packages.append(None)
+        package_results.append(package_result)
+
+    archive_results: list[dict[str, Any]] = []
+    try:
+        archive_results = execute_archive_analyses(
+            archive_tasks,
+            cache_dir=cache_dir,
+            workers=args.archive_workers,
+            timeout_seconds=args.archive_timeout_seconds,
+        )
+    except RehearsalError as exc:
+        runtime_errors.append(str(exc))
+        authority_complete = False
+    archive_result_by_id = {
+        result["task_id"]: result
+        for result in archive_results
+    }
+    for result in archive_results:
+        cache_provenance.extend(result["cache_provenance"])
+
+    for package_index, prepared in enumerate(prepared_packages):
+        if prepared is None:
+            continue
+        package_result = package_results[package_index]
+        name = prepared["name"]
+        current_metadata = prepared["current_metadata"]
+        target_metadata = prepared["target_metadata"]
+        current_path = prepared["current_path"]
+        target_path = prepared["target_path"]
+        try:
+            current_result = archive_result_by_id.get(
+                f"{package_index}:{name}:current"
             )
+            target_result = archive_result_by_id.get(
+                f"{package_index}:{name}:target"
+            )
+            if current_result is None or target_result is None:
+                raise RehearsalError(f"archive analysis result is missing for {name}")
+            if current_result["status"] != "success":
+                raise RehearsalError(current_result["error"])
+            if target_result["status"] != "success":
+                raise RehearsalError(target_result["error"])
+            current_inspection = current_result["inspection"]
+            target_inspection = target_result["inspection"]
             package_metadata = compare_package_metadata(
                 current_inspection["package_json"],
                 target_inspection["package_json"],
@@ -3361,7 +3634,6 @@ def simulate(args: argparse.Namespace) -> int:
         except (KeyError, RehearsalError, OSError, tarfile.TarError) as exc:
             authority_complete = False
             package_result["errors"].append(str(exc))
-        package_results.append(package_result)
 
     runtime_status = (
         "success"
@@ -3661,6 +3933,33 @@ def simulate(args: argparse.Namespace) -> int:
             for result in ("hit", "miss", "ignored", "disabled")
         },
     }
+    archive_execution_report = {
+        "schema": ARCHIVE_EXECUTION_SCHEMA,
+        **common,
+        "authoritative": False,
+        "workers_requested": args.archive_workers,
+        "workers_used": min(args.archive_workers, len(archive_tasks))
+        if archive_tasks
+        else 0,
+        "timeout_seconds": args.archive_timeout_seconds,
+        "entries": [
+            {
+                "task_id": result["task_id"],
+                "package": result["package"],
+                "lane": result["lane"],
+                "status": result["status"],
+                "error": result["error"],
+                "duration_ms": result["duration_ms"],
+            }
+            for result in archive_results
+        ],
+        "counts": {
+            status: sum(
+                1 for result in archive_results if result["status"] == status
+            )
+            for status in ("success", "failed", "timed_out")
+        },
+    }
     postcheck_plan = {
         "schema": "openclaw.safe_update.post_upgrade_e2e.v1",
         **common,
@@ -3688,6 +3987,7 @@ def simulate(args: argparse.Namespace) -> int:
     conservative_gates_path = output_dir / "conservative-gates.json"
     impact_shadow_path = output_dir / "impact-shadow.json"
     analysis_cache_path = output_dir / "analysis-cache.json"
+    archive_execution_path = output_dir / "archive-execution.json"
     synthetic_path = output_dir / "synthetic-update.json"
     customization_path = output_dir / "customization-compatibility.json"
     coverage_path = output_dir / "coverage-report.json"
@@ -3700,6 +4000,7 @@ def simulate(args: argparse.Namespace) -> int:
     if impact_shadow is not None:
         write_json(impact_shadow_path, impact_shadow)
     write_json(analysis_cache_path, analysis_cache_report)
+    write_json(archive_execution_path, archive_execution_report)
     write_json(synthetic_path, synthetic)
     write_json(customization_path, customizations)
     write_json(coverage_path, coverage_report)
@@ -3834,6 +4135,32 @@ def simulate(args: argparse.Namespace) -> int:
     return 2 if blocked else 0
 
 
+def archive_workers_argument(value: str) -> int:
+    try:
+        workers = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("archive workers must be an integer") from exc
+    if workers < 1 or workers > MAX_ARCHIVE_WORKERS:
+        raise argparse.ArgumentTypeError(
+            f"archive workers must be between 1 and {MAX_ARCHIVE_WORKERS}"
+        )
+    return workers
+
+
+def archive_timeout_argument(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "archive timeout seconds must be a number"
+        ) from exc
+    if timeout <= 0 or timeout > 900:
+        raise argparse.ArgumentTypeError(
+            "archive timeout seconds must be greater than 0 and at most 900"
+        )
+    return timeout
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     subcommands = root.add_subparsers(dest="command", required=True)
@@ -3879,6 +4206,16 @@ def parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--conservative-inputs", type=Path)
     simulate_parser.add_argument("--disable-impact-shadow", action="store_true")
     simulate_parser.add_argument("--cache-dir", type=Path)
+    simulate_parser.add_argument(
+        "--archive-workers",
+        type=archive_workers_argument,
+        default=1,
+    )
+    simulate_parser.add_argument(
+        "--archive-timeout-seconds",
+        type=archive_timeout_argument,
+        default=120.0,
+    )
     simulate_parser.add_argument("--allow-no-coverage", action="store_true")
     simulate_parser.add_argument("--runtime-node-version")
     simulate_parser.add_argument("--runtime-os")
@@ -3886,6 +4223,22 @@ def parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--runtime-libc")
     simulate_parser.add_argument("--output-dir", type=Path, required=True)
     simulate_parser.set_defaults(handler=simulate)
+
+    archive_parser = subcommands.add_parser(
+        "_analyze-archive",
+        help=argparse.SUPPRESS,
+    )
+    archive_parser.add_argument("--task-id", required=True)
+    archive_parser.add_argument("--package", required=True)
+    archive_parser.add_argument(
+        "--lane",
+        choices=("current", "target"),
+        required=True,
+    )
+    archive_parser.add_argument("--path", type=Path, required=True)
+    archive_parser.add_argument("--metadata-json", required=True)
+    archive_parser.add_argument("--cache-dir", type=Path)
+    archive_parser.set_defaults(handler=analyze_archive_command)
 
     contract_parser = subcommands.add_parser(
         "contract", help="translate v1.1 manifests into an installation contract"

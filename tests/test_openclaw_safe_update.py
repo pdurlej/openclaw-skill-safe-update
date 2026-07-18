@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -42,6 +44,9 @@ IMPACT_SHADOW_SCHEMA = (
 )
 ANALYSIS_CACHE_SCHEMA = (
     ROOT / "schemas" / "openclaw.safe_update.analysis_cache.v1.schema.json"
+)
+ARCHIVE_EXECUTION_SCHEMA = (
+    ROOT / "schemas" / "openclaw.safe_update.archive_execution.v1.schema.json"
 )
 BASELINE = ROOT / "references" / "v1.1-baseline.json"
 SIGNAL_VOICE_CONTRACT = ROOT / "examples" / "signal-voice.installation-contract.json"
@@ -823,6 +828,7 @@ class SafeUpdateTest(unittest.TestCase):
         input_schema = json.loads(CONSERVATIVE_INPUTS_SCHEMA.read_text())
         impact_schema = json.loads(IMPACT_SHADOW_SCHEMA.read_text())
         cache_schema = json.loads(ANALYSIS_CACHE_SCHEMA.read_text())
+        execution_schema = json.loads(ARCHIVE_EXECUTION_SCHEMA.read_text())
         self.assertEqual(
             gate_schema["properties"]["schema"]["const"],
             SAFE_UPDATE.CONSERVATIVE_GATES_SCHEMA,
@@ -849,6 +855,18 @@ class SafeUpdateTest(unittest.TestCase):
         )
         self.assertFalse(cache_schema["properties"]["authoritative"]["const"])
         self.assertFalse(cache_schema["additionalProperties"])
+        self.assertEqual(
+            execution_schema["properties"]["schema"]["const"],
+            SAFE_UPDATE.ARCHIVE_EXECUTION_SCHEMA,
+        )
+        self.assertFalse(
+            execution_schema["properties"]["authoritative"]["const"]
+        )
+        self.assertEqual(
+            execution_schema["properties"]["workers_requested"]["maximum"],
+            SAFE_UPDATE.MAX_ARCHIVE_WORKERS,
+        )
+        self.assertFalse(execution_schema["additionalProperties"])
         self.assertEqual(baseline["commit"], BASELINE_SHA)
         self.assertEqual(baseline["test_case_count"], 13)
         self.assertEqual(baseline["test_cases"], BASELINE_TEST_CASES)
@@ -1577,6 +1595,347 @@ class SafeUpdateTest(unittest.TestCase):
             }
             <= SAFE_UPDATE.CACHE_NAMESPACES
         )
+
+    def test_sequential_and_parallel_archive_runs_are_decision_equivalent(
+        self,
+    ) -> None:
+        sequential_output = self.root / "archive-sequential"
+        parallel_output = self.root / "archive-parallel"
+        sequential = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            "--archive-workers",
+            "1",
+            output_dir=sequential_output,
+        )
+        parallel = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            "--archive-workers",
+            "2",
+            output_dir=parallel_output,
+        )
+
+        self.assertEqual(sequential.returncode, 0, sequential.stderr)
+        self.assertEqual(parallel.returncode, 0, parallel.stderr)
+        sequential_status = json.loads(
+            (sequential_output / "verdict.json").read_text()
+        )
+        parallel_status = json.loads(
+            (parallel_output / "verdict.json").read_text()
+        )
+        sequential_synthetic = json.loads(
+            (sequential_output / "synthetic-update.json").read_text()
+        )
+        parallel_synthetic = json.loads(
+            (parallel_output / "synthetic-update.json").read_text()
+        )
+        sequential_execution = json.loads(
+            (sequential_output / "archive-execution.json").read_text()
+        )
+        parallel_execution = json.loads(
+            (parallel_output / "archive-execution.json").read_text()
+        )
+        sequential_cache = json.loads(
+            (sequential_output / "analysis-cache.json").read_text()
+        )
+        parallel_cache = json.loads(
+            (parallel_output / "analysis-cache.json").read_text()
+        )
+        self.assertEqual(
+            sequential_status["decision_content"],
+            parallel_status["decision_content"],
+        )
+        self.assertEqual(
+            sequential_status["decision_digest"],
+            parallel_status["decision_digest"],
+        )
+        self.assertEqual(sequential_status["verdict"], parallel_status["verdict"])
+        self.assertEqual(
+            sequential_synthetic["packages"],
+            parallel_synthetic["packages"],
+        )
+        self.assertEqual(
+            [entry["task_id"] for entry in sequential_execution["entries"]],
+            [entry["task_id"] for entry in parallel_execution["entries"]],
+        )
+        self.assertEqual(
+            sequential_cache["entries"],
+            parallel_cache["entries"],
+        )
+        self.assertEqual(sequential_execution["workers_used"], 1)
+        self.assertEqual(parallel_execution["workers_used"], 2)
+        self.assertNotIn(
+            "archive_execution",
+            parallel_status["decision_content"],
+        )
+
+    def test_blocked_archive_result_has_sequential_parallel_parity(self) -> None:
+        write_archive(
+            self.target_archive,
+            "1.1.0",
+            {
+                "package/dist/runtime.js": "const agentRuntime = 'new';\n",
+                "package/extensions/signal/index.js": "signal new\n",
+            },
+            {
+                "engines": {"node": ">=22.0.0"},
+                "scripts": {"postinstall": "node install.js"},
+            },
+        )
+        metadata_path = self.input / "input-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["packages"][0]["target"]["integrity"] = integrity(
+            self.target_archive
+        )
+        metadata["packages"][0]["target"]["shasum"] = hashlib.sha1(
+            self.target_archive.read_bytes()
+        ).hexdigest()
+        metadata["core_candidate"]["target"] = core_closure(
+            "1.1.0",
+            [("@example/message-codec", "3.4.2")],
+            root_integrity=integrity(self.target_archive),
+        )
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        sequential_output = self.root / "blocked-sequential"
+        parallel_output = self.root / "blocked-parallel"
+
+        sequential = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            "--archive-workers",
+            "1",
+            output_dir=sequential_output,
+        )
+        parallel = self.run_simulation(
+            "--customizations",
+            str(self.customizations),
+            "--archive-workers",
+            "2",
+            output_dir=parallel_output,
+        )
+
+        self.assertEqual(sequential.returncode, 2, sequential.stderr)
+        self.assertEqual(parallel.returncode, 2, parallel.stderr)
+        sequential_status = json.loads(
+            (sequential_output / "verdict.json").read_text()
+        )
+        parallel_status = json.loads(
+            (parallel_output / "verdict.json").read_text()
+        )
+        self.assertEqual(
+            sequential_status["decision_content"],
+            parallel_status["decision_content"],
+        )
+        self.assertEqual(
+            sequential_status["decision_digest"],
+            parallel_status["decision_digest"],
+        )
+        self.assertEqual(sequential_status["verdict"], "blocked")
+        self.assertEqual(parallel_status["verdict"], "blocked")
+
+    def test_archive_executor_bounds_concurrency_and_preserves_task_order(
+        self,
+    ) -> None:
+        lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def unit_runner(
+            task: dict[str, object],
+            cache_dir: Path | None,
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del cache_dir, timeout_seconds
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return {
+                "task_id": task["task_id"],
+                "package": task["name"],
+                "lane": task["lane"],
+                "status": "success",
+                "inspection": {},
+                "error": None,
+                "cache_provenance": [],
+                "duration_ms": 30,
+            }
+
+        tasks = [
+            {
+                "task_id": f"{index}:package-{index}:target",
+                "name": f"package-{index}",
+                "lane": "target",
+                "path": self.root / f"package-{index}.tgz",
+                "metadata": {
+                    "name": f"package-{index}",
+                    "version": "1.0.0",
+                },
+            }
+            for index in range(4)
+        ]
+        results = SAFE_UPDATE.execute_archive_analyses(
+            tasks,
+            cache_dir=None,
+            workers=2,
+            timeout_seconds=1,
+            unit_runner=unit_runner,
+        )
+
+        self.assertEqual(
+            [result["task_id"] for result in results],
+            [task["task_id"] for task in tasks],
+        )
+        self.assertTrue(all(result["status"] == "success" for result in results))
+        self.assertEqual(maximum_active, 2)
+
+    def test_archive_executor_reports_mixed_failure_and_timeout(self) -> None:
+        def unit_runner(
+            task: dict[str, object],
+            cache_dir: Path | None,
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del cache_dir
+            metadata = task["metadata"]
+            if metadata["behavior"] == "failed":
+                return {
+                    "task_id": task["task_id"],
+                    "package": task["name"],
+                    "lane": task["lane"],
+                    "status": "failed",
+                    "inspection": None,
+                    "error": "seeded archive failure",
+                    "cache_provenance": [],
+                    "duration_ms": 0,
+                }
+            if metadata["behavior"] == "slow":
+                return SAFE_UPDATE.archive_timeout_result(
+                    task,
+                    timeout_seconds,
+                )
+            return {
+                "task_id": task["task_id"],
+                "package": task["name"],
+                "lane": task["lane"],
+                "status": "success",
+                "inspection": {},
+                "error": None,
+                "cache_provenance": [],
+                "duration_ms": 0,
+            }
+
+        tasks = [
+            {
+                "task_id": f"{index}:{behavior}:target",
+                "name": behavior,
+                "lane": "target",
+                "path": self.root / f"{behavior}.tgz",
+                "metadata": {"name": behavior, "behavior": behavior},
+            }
+            for index, behavior in enumerate(("success", "failed", "slow"))
+        ]
+        results = SAFE_UPDATE.execute_archive_analyses(
+            tasks,
+            cache_dir=None,
+            workers=3,
+            timeout_seconds=0.01,
+            unit_runner=unit_runner,
+        )
+
+        self.assertEqual(
+            [result["status"] for result in results],
+            ["success", "failed", "timed_out"],
+        )
+        self.assertEqual(results[1]["error"], "seeded archive failure")
+        self.assertIn("timed out", results[2]["error"])
+        with self.assertRaises(SAFE_UPDATE.RehearsalError):
+            SAFE_UPDATE.execute_archive_analyses(
+                tasks,
+                cache_dir=None,
+                workers=SAFE_UPDATE.MAX_ARCHIVE_WORKERS + 1,
+                timeout_seconds=1,
+                unit_runner=unit_runner,
+            )
+        with patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit):
+                SAFE_UPDATE.parser().parse_args(
+                    [
+                        "simulate",
+                        "--input-dir",
+                        str(self.input),
+                        "--output-dir",
+                        str(self.root / "invalid-workers"),
+                        "--archive-workers",
+                        "0",
+                    ]
+                )
+
+    def test_archive_subprocess_timeout_is_killed_and_reported(self) -> None:
+        task = {
+            "task_id": "0:openclaw:target",
+            "name": "openclaw",
+            "lane": "target",
+            "path": self.target_archive,
+            "metadata": {
+                "name": "openclaw",
+                "version": "1.1.0",
+            },
+        }
+        with patch.object(
+            SAFE_UPDATE.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=["archive-worker"],
+                timeout=0.01,
+            ),
+        ):
+            result = SAFE_UPDATE.run_archive_subprocess_unit(
+                task,
+                None,
+                0.01,
+            )
+
+        self.assertEqual(result["status"], "timed_out")
+        self.assertIn("timed out", result["error"])
+        self.assertEqual(result["cache_provenance"], [])
+
+    def test_archive_timeout_prevents_late_subprocess_write(self) -> None:
+        marker = self.root / "late-write-marker"
+        task = {
+            "task_id": "0:openclaw:target",
+            "name": "openclaw",
+            "lane": "target",
+            "path": self.target_archive,
+            "metadata": {
+                "name": "openclaw",
+                "version": "1.1.0",
+            },
+        }
+        command = [
+            sys.executable,
+            "-c",
+            (
+                "import pathlib,sys,time;"
+                "time.sleep(0.2);"
+                "pathlib.Path(sys.argv[1]).write_text('late')"
+            ),
+            str(marker),
+        ]
+
+        result = SAFE_UPDATE.run_archive_subprocess_unit(
+            task,
+            None,
+            0.02,
+            command_override=command,
+        )
+        time.sleep(0.25)
+
+        self.assertEqual(result["status"], "timed_out")
+        self.assertFalse(marker.exists())
 
     def test_corrupt_cache_entry_is_ignored_and_recomputed(self) -> None:
         cache = self.root / "corrupt-cache-store"

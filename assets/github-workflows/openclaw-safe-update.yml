@@ -135,6 +135,7 @@ jobs:
           elif [[ "$REQUIRE_CUSTOMIZATIONS" != "true" ]]; then
             arguments+=(--allow-no-customizations)
           fi
+          arguments+=(--archive-workers 4)
           python3 scripts/openclaw_safe_update.py simulate "${arguments[@]}"
 
       - name: Upload fail-closed evidence
@@ -151,6 +152,7 @@ jobs:
             artifacts/safe-update/conservative-gates.json
             artifacts/safe-update/impact-shadow.json
             artifacts/safe-update/analysis-cache.json
+            artifacts/safe-update/archive-execution.json
             artifacts/safe-update/synthetic-update.json
             artifacts/safe-update/customization-compatibility.json
             artifacts/safe-update/coverage-report.json
