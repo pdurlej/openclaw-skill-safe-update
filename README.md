@@ -197,6 +197,7 @@ protection this project exists to provide.
 | `evidence-bundle.json` | SHA-256 binding for downstream review or policy gates |
 | `verdict.json` | Machine-readable `blocked` or `ready_for_operator_plan` verdict |
 | `summary.md` | Human-readable review surface |
+| `operator-view.md` | Workflow summary derived from the canonical status; never an authority |
 | `operator-plan.md` | Rollback-aware preparation that explicitly stops before apply |
 
 `ready_for_operator_plan` means the exact package archives, resolved OpenClaw
