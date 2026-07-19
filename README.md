@@ -12,6 +12,7 @@
   <a href="https://github.com/pdurlej/openclaw-skill-safe-update/actions/workflows/validate.yml"><img alt="Validate skill" src="https://github.com/pdurlej/openclaw-skill-safe-update/actions/workflows/validate.yml/badge.svg"></a>
   <a href="https://github.com/pdurlej/openclaw-skill-safe-update/actions/workflows/validate.yml"><img alt="OpenClaw skill validated" src="https://img.shields.io/badge/OpenClaw%20skill-validated-7aa82b"></a>
   <a href="https://clawhub.ai/pdurlej/safe-upgrade-rehearsal"><img alt="Available on ClawHub" src="https://img.shields.io/badge/ClawHub-published-7aa82b"></a>
+  <a href="https://github.com/pdurlej/openclaw-skill-safe-update/releases/latest"><img alt="Latest GitHub release" src="https://img.shields.io/github/v/release/pdurlej/openclaw-skill-safe-update?display_name=tag"></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-7aa82b"></a>
   <img alt="Dry run only" src="https://img.shields.io/badge/mode-dry%20run%20only-222222">
 </p>

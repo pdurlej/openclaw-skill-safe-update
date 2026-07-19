@@ -2898,7 +2898,7 @@ class SafeUpdateTest(unittest.TestCase):
         validate_workflow = VALIDATE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("clawhub@0.23.1 skill publish", validate_workflow)
         self.assertIn("--slug safe-upgrade-rehearsal", validate_workflow)
-        self.assertIn("--version 1.1.0", validate_workflow)
+        self.assertIn("--version 1.3.0", validate_workflow)
         self.assertNotIn("--slug openclaw-", validate_workflow)
         self.assertIn("--dry-run", validate_workflow)
         self.assertNotIn("CLAWHUB_TOKEN", validate_workflow)
