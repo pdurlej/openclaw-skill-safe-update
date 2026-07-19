@@ -27,8 +27,8 @@ jobs:
             --slug safe-upgrade-rehearsal \
             --name "OpenClaw Safe Upgrade Rehearsal Kit" \
             --owner pdurlej \
-            --version 1.1.0 \
-            --changelog "Add installation inventory, hard coverage gate, package metadata risks, and generated post-upgrade E2E and operator plans." \
+            --version 1.3.0 \
+            --changelog "Closed-candidate shadow rehearsal with conservative gates, additive impact analysis, phase handoffs, and one operator view." \
             --topics "dry-run,upgrade-rehearsal,release-engineering,supply-chain-security" \
             --dry-run \
             --json
