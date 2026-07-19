@@ -89,6 +89,24 @@ class OperatorViewTest(unittest.TestCase):
             check=False,
         )
 
+    def run_view_with_index(self) -> subprocess.CompletedProcess[str]:
+        index_path = ROOT / "references" / "shadow-runs-index.json"
+        return subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--artifact-dir",
+                str(self.artifacts),
+                "--repository-url",
+                "https://github.com/pdurlej/openclaw-skill-safe-update",
+                "--shadow-runs-index",
+                str(index_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def write_status(self, verdict: str) -> None:
         (self.artifacts / "verdict.json").write_text(
             json.dumps(status(verdict)),
@@ -167,6 +185,7 @@ class OperatorViewTest(unittest.TestCase):
         self.assertIn("artifacts/safe-update/impact-shadow.json", workflow)
         self.assertIn("artifacts/advisory-*.json", workflow)
         self.assertIn("artifacts/benchmark/*.json", workflow)
+        self.assertIn("references/shadow-runs-index.json", workflow)
         self.assertIn("$GITHUB_STEP_SUMMARY", workflow)
         self.assertLess(
             workflow.index("Upload fail-closed evidence"),
@@ -181,6 +200,16 @@ class OperatorViewTest(unittest.TestCase):
             "contents: write",
         ):
             self.assertNotIn(banned, workflow)
+
+    def test_v13_progress_exposes_bounded_completion_without_enabling_selection(self) -> None:
+        self.write_status("ready_for_operator_plan")
+        result = self.run_view_with_index()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Exit decision: `retain_additive_baseline`", result.stdout)
+        self.assertIn("Fixture threshold: `100%`", result.stdout)
+        self.assertIn("Field rehearsal threshold: `0%`", result.stdout)
+        self.assertIn("Candidate-root threshold: `0%`", result.stdout)
+        self.assertIn("Selective omission enabled: `false`", result.stdout)
 
 
 if __name__ == "__main__":

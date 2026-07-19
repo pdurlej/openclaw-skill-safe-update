@@ -159,6 +159,7 @@ jobs:
             --artifact-dir artifacts/safe-update \
             --repository-url "${{ github.server_url }}/${{ github.repository }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --shadow-runs-index references/shadow-runs-index.json \
             --output artifacts/safe-update/operator-view.md
           tee -a "$GITHUB_STEP_SUMMARY" < artifacts/safe-update/operator-view.md
 
@@ -189,6 +190,7 @@ jobs:
             artifacts/safe-update/operator-view.md
             artifacts/advisory-*.json
             artifacts/benchmark/*.json
+            references/shadow-runs-index.json
           if-no-files-found: error
           retention-days: 14
 
