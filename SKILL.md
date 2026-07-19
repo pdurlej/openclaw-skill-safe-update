@@ -188,6 +188,9 @@ The reusable GitHub workflow renders one `operator-view.md` from the strict
 evidence, deterministic gate IDs, non-authoritative shadow observations, and
 evidence/progress links. It cannot override the verdict and does not claim
 live channel, MCP, memory, migration, rollback, or post-activation proof.
+The bundled `references/shadow-runs-index.json` also exposes the bounded v1.3
+completion percentages and conservative exit decision. It is evaluation-only
+and cannot enable selective omission.
 
 `impact-shadow.json` can only describe hypothetical additional checks and
 risks. It must never remove a baseline check, enter the evidence bundle, or

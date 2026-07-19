@@ -198,6 +198,12 @@ protection this project exists to provide.
 | `verdict.json` | Machine-readable `blocked` or `ready_for_operator_plan` verdict |
 | `summary.md` | Human-readable review surface |
 | `operator-view.md` | Workflow summary derived from the canonical status; never an authority |
+
+The v1.3 exit record is published in
+[`references/v1.3-decision.md`](references/v1.3-decision.md), backed by the
+machine-readable
+[`references/shadow-runs-index.json`](references/shadow-runs-index.json).
+It retains the full additive baseline and does not enable selective omission.
 | `operator-plan.md` | Rollback-aware preparation that explicitly stops before apply |
 
 `ready_for_operator_plan` means the exact package archives, resolved OpenClaw

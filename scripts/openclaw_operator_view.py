@@ -27,6 +27,7 @@ def render(
     artifact_dir: Path,
     repository_url: str,
     run_url: str | None,
+    shadow_runs_index: Path | None = None,
 ) -> str:
     status = parse_status(read_json(artifact_dir / "verdict.json"))
     decision = status["decision_content"]
@@ -120,11 +121,31 @@ def render(
         lines.append(f"- {link('Workflow run and uploaded artifact', run_url)}")
 
     repo = repository_url.rstrip("/")
+    lines.extend(["", "## v1.3 progress", ""])
+    if shadow_runs_index and shadow_runs_index.is_file():
+        index = read_json(shadow_runs_index)
+        if (
+            isinstance(index, dict)
+            and index.get("schema")
+            == "openclaw.safe_update.shadow_runs_index.v1"
+            and isinstance(index.get("completion"), dict)
+        ):
+            completion = index["completion"]
+            lines.extend(
+                [
+                    f"- Exit decision: `{index.get('decision', 'invalid')}`",
+                    f"- Fixture threshold: `{completion.get('fixtures_percent', 0)}%`",
+                    f"- Field rehearsal threshold: `{completion.get('field_rehearsals_percent', 0)}%`",
+                    f"- Candidate-root threshold: `{completion.get('candidate_roots_percent', 0)}%`",
+                    f"- Selective omission enabled: `{str(bool(index.get('selective_omission_enabled'))).lower()}`",
+                ]
+            )
+        else:
+            lines.append("- Shadow-runs index: `invalid`; canonical status is unchanged")
+    else:
+        lines.append("- Shadow-runs index: `not_available`")
     lines.extend(
         [
-            "",
-            "## v1.3 progress",
-            "",
             f"- {link('RFC and epic #7', repo + '/issues/7')}",
             f"- {link('v1.3 issue progress', repo + '/issues?q=is%3Aissue+label%3Av1.3')}",
             f"- {link('Pull request progress', repo + '/pulls?q=is%3Apr')}",
@@ -142,6 +163,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--artifact-dir", type=Path, required=True)
     result.add_argument("--repository-url", required=True)
     result.add_argument("--run-url")
+    result.add_argument("--shadow-runs-index", type=Path)
     result.add_argument("--output", type=Path)
     return result
 
@@ -153,6 +175,7 @@ def main() -> int:
             args.artifact_dir.resolve(),
             args.repository_url,
             args.run_url,
+            args.shadow_runs_index.resolve() if args.shadow_runs_index else None,
         )
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
