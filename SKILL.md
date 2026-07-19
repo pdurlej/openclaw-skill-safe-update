@@ -179,8 +179,15 @@ Inspect these artifacts:
 - `verdict.json`
 - `summary.md`
 - `operator-plan.md`
+- `operator-view.md` (non-authoritative workflow summary)
 
 If the verdict is `blocked`, report the failed evidence, affected surface, and what must be proven; do not invent a repair. If it is `ready_for_operator_plan`, review the generated plan, add the verified backup, exact rollback, maintenance window, and scoped mutation command. `post-upgrade-e2e.json` remains `not_run` until a separately approved update has happened. Stop before apply.
+
+The reusable GitHub workflow renders one `operator-view.md` from the strict
+`verdict.json`. It shows the preflight phase, candidate root, baseline
+evidence, deterministic gate IDs, non-authoritative shadow observations, and
+evidence/progress links. It cannot override the verdict and does not claim
+live channel, MCP, memory, migration, rollback, or post-activation proof.
 
 `impact-shadow.json` can only describe hypothetical additional checks and
 risks. It must never remove a baseline check, enter the evidence bundle, or

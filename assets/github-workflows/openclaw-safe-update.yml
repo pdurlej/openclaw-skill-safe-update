@@ -113,6 +113,16 @@ jobs:
             --packages-json "$PACKAGES_JSON" \
             --output-dir artifacts/input
 
+      - name: Prepare installation contract report
+        continue-on-error: true
+        run: |
+          if [[ -f "$CUSTOMIZATIONS_FILE" && -f "$COVERAGE_FILE" ]]; then
+            python3 scripts/openclaw_safe_update.py contract \
+              --customizations "$CUSTOMIZATIONS_FILE" \
+              --coverage "$COVERAGE_FILE" \
+              --output artifacts/installation-contract.json
+          fi
+
       - name: Run synthetic update rehearsal
         id: rehearsal
         continue-on-error: true
@@ -135,8 +145,22 @@ jobs:
           elif [[ "$REQUIRE_CUSTOMIZATIONS" != "true" ]]; then
             arguments+=(--allow-no-customizations)
           fi
+          if [[ -f artifacts/installation-contract.json ]]; then
+            arguments+=(--installation-contract artifacts/installation-contract.json)
+          fi
           arguments+=(--archive-workers 4)
           python3 scripts/openclaw_safe_update.py simulate "${arguments[@]}"
+
+      - name: Render the non-authoritative operator view
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 scripts/openclaw_operator_view.py \
+            --artifact-dir artifacts/safe-update \
+            --repository-url "${{ github.server_url }}/${{ github.repository }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --output artifacts/safe-update/operator-view.md
+          tee -a "$GITHUB_STEP_SUMMARY" < artifacts/safe-update/operator-view.md
 
       - name: Upload fail-closed evidence
         if: always()
@@ -145,6 +169,7 @@ jobs:
           name: openclaw-safe-update-${{ inputs['target-version'] }}
           path: |
             artifacts/input/input-metadata.json
+            artifacts/installation-contract.json
             artifacts/safe-update/runtime-truth.json
             artifacts/safe-update/core-candidate-lock.json
             artifacts/safe-update/installation-candidate-lock.json
@@ -161,6 +186,9 @@ jobs:
             artifacts/safe-update/verdict.json
             artifacts/safe-update/summary.md
             artifacts/safe-update/operator-plan.md
+            artifacts/safe-update/operator-view.md
+            artifacts/advisory-*.json
+            artifacts/benchmark/*.json
           if-no-files-found: error
           retention-days: 14
 
