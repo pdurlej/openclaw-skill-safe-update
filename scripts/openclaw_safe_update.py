@@ -13,6 +13,7 @@ import os
 import platform
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -97,6 +98,34 @@ MAX_TEXT_MEMBER_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_MEMBER_BYTES = 512 * 1024 * 1024
 DIFF_MEMBER_LIMIT = 250
 NPM_REGISTRY = "https://registry.npmjs.org"
+RUNTIME_COMMANDS = frozenset({"node", "npm"})
+NPM_ENVIRONMENT_KEYS = (
+    "ALL_PROXY",
+    "COMSPEC",
+    "HOME",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "LANG",
+    "LC_ALL",
+    "NODE_EXTRA_CA_CERTS",
+    "NO_PROXY",
+    "PATH",
+    "PATHEXT",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
+NPM_ENVIRONMENT_OVERRIDES = frozenset(
+    {"NPM_CONFIG_CPU", "NPM_CONFIG_LIBC", "NPM_CONFIG_OS"}
+)
 SUPPORTED_INSTALL_SHAPES = {"npm_global_linux"}
 SURFACE_CATEGORIES = {
     "attachment",
@@ -674,10 +703,19 @@ def write_text(path: Path, value: str) -> None:
             os.unlink(temporary)
 
 
+def resolve_runtime_command(command: str) -> str:
+    if command not in RUNTIME_COMMANDS:
+        raise RehearsalError(f"unsupported runtime command: {command}")
+    resolved = shutil.which(command)
+    if resolved is None:
+        raise RehearsalError(f"{command} is not available")
+    return resolved
+
+
 def detect_node_version() -> str:
     try:
         completed = subprocess.run(
-            ["node", "--version"],
+            [resolve_runtime_command("node"), "--version"],
             check=True,
             capture_output=True,
             text=True,
@@ -686,7 +724,12 @@ def detect_node_version() -> str:
         candidate = completed.stdout.strip().removeprefix("v")
         if VERSION_RE.fullmatch(candidate):
             return candidate
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except (
+        FileNotFoundError,
+        RehearsalError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ):
         pass
     return "unknown"
 
@@ -807,11 +850,34 @@ def run_npm_json(
     working_dir: Path | None = None,
     environment_overrides: dict[str, str] | None = None,
 ) -> Any:
+    overrides = environment_overrides or {}
+    unsupported = sorted(set(overrides) - NPM_ENVIRONMENT_OVERRIDES)
+    if unsupported:
+        raise RehearsalError(
+            "unsupported npm environment override: " + ", ".join(unsupported)
+        )
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RehearsalError("cannot create isolated npm cache") from exc
+    execution_dir = working_dir or cache_dir
+    project_config = execution_dir / ".npmrc"
+    try:
+        if project_config.exists() and project_config.read_bytes():
+            raise RehearsalError(
+                "npm working directory contains a non-empty project .npmrc"
+            )
+        project_config.touch(exist_ok=True)
+    except OSError as exc:
+        raise RehearsalError("cannot isolate npm project configuration") from exc
     user_config = cache_dir / "user.npmrc"
     global_config = cache_dir / "global.npmrc"
     user_config.touch(exist_ok=True)
     global_config.touch(exist_ok=True)
-    environment = os.environ.copy()
+    environment = {
+        key: os.environ[key] for key in NPM_ENVIRONMENT_KEYS if key in os.environ
+    }
+    environment.setdefault("PATH", os.defpath)
     environment.update(
         {
             "NPM_CONFIG_IGNORE_SCRIPTS": "true",
@@ -824,13 +890,13 @@ def run_npm_json(
             "NPM_CONFIG_USERCONFIG": str(user_config),
             "NPM_CONFIG_GLOBALCONFIG": str(global_config),
             "NPM_CONFIG_MIN_RELEASE_AGE": "0",
-            **(environment_overrides or {}),
+            **overrides,
         }
     )
     try:
         completed = subprocess.run(
-            ["npm", *arguments],
-            cwd=working_dir,
+            [resolve_runtime_command("npm"), *arguments],
+            cwd=execution_dir,
             check=True,
             capture_output=True,
             text=True,
@@ -852,12 +918,17 @@ def run_npm_json(
 def command_version(command: str) -> str:
     try:
         completed = subprocess.run(
-            [command, "--version"],
+            [resolve_runtime_command(command), "--version"],
             check=True,
             capture_output=True,
             text=True,
+            timeout=10,
         )
-    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+    except (
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as exc:
         raise RehearsalError(f"{command} is not available") from exc
     value = completed.stdout.strip().removeprefix("v")
     if semver_tuple(value) is None:

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.1 - 2026-07-26
+
+- Isolate project, user, and global npm configuration and stop forwarding
+  ambient credentials to package-resolution subprocesses.
+- Resolve required runtime tools and advisory executables before invocation.
+- Give optional advisory adapters a bounded environment with explicit
+  per-variable opt-in.
+- Declare the skill's Python, Node.js, and npm prerequisites in OpenClaw
+  metadata.
+
 ## 1.3.0 - 2026-07-19
 
 - Add a public-safe local inventory command and coverage-profile draft.

@@ -1,6 +1,7 @@
 ---
 name: openclaw-safe-update
 description: Dry-run an OpenClaw version update without touching a live runtime. Use when comparing current and target OpenClaw packages, checking customized Signal, Matrix, MCP, provider, or runtime integration surfaces, producing synthetic-update evidence, preparing a Patchwarden-compatible review bundle, or writing a rollback-aware operator plan before an update.
+metadata: {"openclaw":{"homepage":"https://github.com/pdurlej/openclaw-skill-safe-update","requires":{"bins":["python3","node","npm"]}}}
 ---
 
 # OpenClaw Safe Upgrade Rehearsal Kit
@@ -12,6 +13,7 @@ Prepare evidence for an OpenClaw update while keeping production unchanged. Ever
 - Do not run `openclaw update`, install packages globally, repair dependencies, deploy, restart services, or mutate live configuration.
 - Do not execute package lifecycle scripts or code from downloaded archives.
 - Do not include secrets, private conversations, live configuration values, or raw production logs in cloud reviews or artifacts.
+- Package resolution uses isolated project, user, and global npm configuration plus a bounded subprocess environment; it does not forward ambient API, cloud, or npm credentials.
 - When package metadata, integrity, required packages, customization checks, installation coverage, or required evidence are missing, return `blocked` and stop instead of guessing.
 - Stop at `ready_for_operator_plan`. A separate, explicit operator approval is required for every live mutation.
 

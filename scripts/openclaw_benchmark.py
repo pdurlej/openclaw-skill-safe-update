@@ -29,6 +29,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,31 @@ ADAPTER_ID_UNCONFIGURED = "not_configured"
 INDEX_ENTRY_FILENAME = "shadow-run-index-entry.json"
 MAX_RESULT_BYTES = 4 * 1024 * 1024
 ADAPTER_TIMEOUT_SECONDS = 30
+ADAPTER_ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ADAPTER_BASE_ENV_KEYS = (
+    "ALL_PROXY",
+    "COMSPEC",
+    "HOME",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "LANG",
+    "LC_ALL",
+    "NODE_EXTRA_CA_CERTS",
+    "NO_PROXY",
+    "PATH",
+    "PATHEXT",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
 
 # Deterministic arms run as fixed deterministic identities; they never
 # inherit the operator-supplied (advisory) model family.
@@ -840,10 +866,27 @@ def _not_available_result(reason: str) -> dict[str, Any]:
     }
 
 
+def _adapter_environment(pass_names: list[str] | None = None) -> dict[str, str]:
+    environment = {
+        key: os.environ[key] for key in ADAPTER_BASE_ENV_KEYS if key in os.environ
+    }
+    environment.setdefault("PATH", os.defpath)
+    for name in pass_names or []:
+        if not ADAPTER_ENV_NAME_PATTERN.fullmatch(name):
+            raise BenchmarkError("adapter environment name is invalid")
+        if name not in os.environ:
+            raise BenchmarkError(
+                "requested adapter environment variable is unavailable"
+            )
+        environment[name] = os.environ[name]
+    return environment
+
+
 def _invoke_adapter(
     command: str,
     advisory_input: dict[str, Any],
     timeout: float,
+    environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Invoke the configured advisory adapter and parse its runner envelope.
 
@@ -862,6 +905,13 @@ def _invoke_adapter(
         raise BenchmarkError("adapter command is malformed") from exc
     if not argv:
         raise BenchmarkError("adapter command is empty")
+    adapter_environment = (
+        _adapter_environment() if environment is None else environment
+    )
+    executable = shutil.which(argv[0], path=adapter_environment.get("PATH"))
+    if executable is None:
+        raise BenchmarkError("adapter command not found")
+    argv[0] = executable
     try:
         completed = subprocess.run(
             argv,
@@ -871,6 +921,7 @@ def _invoke_adapter(
             text=True,
             timeout=timeout,
             check=False,
+            env=adapter_environment,
         )
     except FileNotFoundError as exc:
         raise BenchmarkError("adapter command not found") from exc
@@ -1539,6 +1590,19 @@ def run_command(args: argparse.Namespace) -> int:
     if args.disable_advisory:
         adapter_command = None
         adapter_id = ADAPTER_ID_UNCONFIGURED
+    if args.advisory_pass_env and not adapter_command:
+        raise BenchmarkError("--advisory-pass-env requires --advisory-adapter")
+    adapter_environment = _adapter_environment(args.advisory_pass_env)
+
+    def adapter_invoke(
+        command: str, advisory_input: dict[str, Any], timeout: float
+    ) -> dict[str, Any]:
+        return _invoke_adapter(
+            command,
+            advisory_input,
+            timeout,
+            environment=adapter_environment,
+        )
 
     arms_to_run = list(ARM_ORDER)
     if args.disable_advisory:
@@ -1550,7 +1614,10 @@ def run_command(args: argparse.Namespace) -> int:
     for arm in arms_to_run:
         if arm == ARM_ADVISORY:
             raw_outputs[arm] = _run_advisory_arm(
-                fixtures, adapter_command, args.adapter_timeout_seconds, _invoke_adapter
+                fixtures,
+                adapter_command,
+                args.adapter_timeout_seconds,
+                adapter_invoke,
             )
         else:
             raw_outputs[arm] = _run_deterministic_arm(arm, fixtures)
@@ -1924,6 +1991,15 @@ def parser() -> argparse.ArgumentParser:
         "(matches [a-z0-9][a-z0-9-]{0,63}). Reported in every artifact in "
         "place of the shell command. Defaults to 'configured' when an "
         "adapter is set; reported as 'not_configured' otherwise.",
+    )
+    run.add_argument(
+        "--advisory-pass-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Pass one named environment variable to the trusted local advisory "
+        "adapter. Repeat for additional names. Values are never written to "
+        "artifacts. Without this option, ambient credentials are not inherited.",
     )
     run.add_argument(
         "--adapter-timeout-seconds",

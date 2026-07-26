@@ -282,6 +282,11 @@ unchanged. Agreement between workers is not confidence, and advisory output
 cannot establish “unaffected,” waive a check, emit a verdict, or enter the
 analysis cache.
 
+The optional benchmark adapter is an explicitly trusted local command and
+receives a bounded environment by default. The only inherited values are
+runtime and transport settings; opt in only the additional variables it needs
+with `--advisory-pass-env NAME`.
+
 The gate tells you **what is at risk, which evidence failed, and what still must
 be proven**. It deliberately does not prescribe how to rewrite every local
 integration. That repair belongs to the owner of the installation.
