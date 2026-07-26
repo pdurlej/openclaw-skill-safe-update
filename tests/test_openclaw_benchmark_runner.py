@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1136,6 +1137,54 @@ class BenchmarkRunnerAdapterBoundaryTest(unittest.TestCase):
         self.assertNotIn("case_kind", blob)
         self.assertNotIn("regression", blob)
         self.assertNotIn("expected_", blob)
+
+    def test_adapter_default_environment_excludes_ambient_credentials(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake_run(
+            argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            captured["argv"] = argv
+            captured["environment"] = kwargs["env"]
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout='{"result":{},"usage":{}}',
+                stderr="",
+            )
+
+        ambient = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/operator",
+            "LANG": "pl_PL.UTF-8",
+            "ZAI_API_KEY": "must-not-pass",
+            "GH_TOKEN": "must-not-pass",
+        }
+        with patch.dict(
+            self.runner.os.environ, ambient, clear=True
+        ), patch.object(
+            self.runner.shutil, "which", return_value="/usr/bin/python3"
+        ), patch.object(
+            self.runner.subprocess, "run", side_effect=fake_run
+        ):
+            envelope = self.runner._invoke_adapter("python3 adapter.py", {}, 1.0)
+
+        self.assertEqual(envelope, {"result": {}, "usage": {}})
+        self.assertEqual(captured["argv"][0], "/usr/bin/python3")
+        environment = captured["environment"]
+        self.assertEqual(environment["HOME"], "/home/operator")
+        self.assertNotIn("ZAI_API_KEY", environment)
+        self.assertNotIn("GH_TOKEN", environment)
+
+    def test_adapter_environment_allows_explicit_variable_opt_in(self) -> None:
+        with patch.dict(
+            self.runner.os.environ,
+            {"PATH": "/usr/bin", "ZAI_API_KEY": "explicit-value"},
+            clear=True,
+        ):
+            environment = self.runner._adapter_environment(["ZAI_API_KEY"])
+
+        self.assertEqual(environment["ZAI_API_KEY"], "explicit-value")
 
     def _valid_result_envelope(
         self,

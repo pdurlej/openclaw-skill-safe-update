@@ -251,6 +251,12 @@ malformed JSON degrades that fixture to `not_available`; a schema-invalid
 result is recorded as a rejected advisory attempt. Artifacts contain only the
 sanitized `--advisory-adapter-id`, never the command, stderr, exception text,
 or local path.
+
+The adapter command is an explicitly trusted local executable. It receives a
+bounded process environment by default, so arbitrary ambient API, cloud, and
+package credentials are not inherited. Pass only credentials that the
+selected adapter actually needs by repeating `--advisory-pass-env NAME`; the
+value is read from the caller environment and is never written to an artifact.
 `--disable-advisory` skips the advisory arm even when an adapter is set.
 `--deterministic-only` runs only the baseline and shadow-impact arms. A
 blocked run exits with status 2 and writes nothing to the output directory.

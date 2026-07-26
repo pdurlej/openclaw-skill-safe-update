@@ -22,6 +22,7 @@ SCRIPT = ROOT / "scripts" / "openclaw_safe_update.py"
 WORKFLOW = ROOT / "assets" / "github-workflows" / "openclaw-safe-update.yml"
 VALIDATE_WORKFLOW = ROOT / ".github" / "workflows" / "validate.yml"
 README = ROOT / "README.md"
+SKILL = ROOT / "SKILL.md"
 LICENSE = ROOT / "LICENSE"
 UPGRADE_ISSUE_TEMPLATE = ROOT / ".github" / "ISSUE_TEMPLATE" / "upgrade-experience.yml"
 HERO = ROOT / "assets" / "brand" / "openclaw-safe-upgrade-hero.png"
@@ -644,6 +645,83 @@ class SafeUpdateTest(unittest.TestCase):
             },
         )
         self.assertEqual(closure["resolver"]["ignore_scripts"], True)
+
+    def test_npm_subprocess_environment_excludes_ambient_credentials(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            captured["command"] = command
+            captured["environment"] = kwargs["env"]
+            captured["cwd"] = kwargs["cwd"]
+            captured["project_config"] = (Path(kwargs["cwd"]) / ".npmrc").read_bytes()
+            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+        ambient = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/operator",
+            "LANG": "pl_PL.UTF-8",
+            "HTTPS_PROXY": "https://proxy.example",
+            "NPM_TOKEN": "must-not-pass",
+            "NODE_AUTH_TOKEN": "must-not-pass",
+            "AWS_SECRET_ACCESS_KEY": "must-not-pass",
+        }
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            SAFE_UPDATE.os.environ, ambient, clear=True
+        ), patch.object(
+            SAFE_UPDATE.shutil, "which", return_value="/usr/bin/npm"
+        ), patch.object(
+            SAFE_UPDATE.subprocess, "run", side_effect=fake_run
+        ):
+            cache_dir = Path(temporary) / "cache"
+            result = SAFE_UPDATE.run_npm_json(
+                ["view", "openclaw@1.0.0", "--json"],
+                cache_dir,
+                environment_overrides={"NPM_CONFIG_OS": "linux"},
+            )
+
+        self.assertEqual(result, {})
+        self.assertEqual(captured["command"][0], "/usr/bin/npm")
+        self.assertEqual(captured["cwd"], cache_dir)
+        self.assertEqual(captured["project_config"], b"")
+        environment = captured["environment"]
+        self.assertEqual(environment["HOME"], "/home/operator")
+        self.assertEqual(environment["HTTPS_PROXY"], "https://proxy.example")
+        self.assertEqual(environment["NPM_CONFIG_OS"], "linux")
+        self.assertEqual(environment["NPM_CONFIG_REGISTRY"], SAFE_UPDATE.NPM_REGISTRY)
+        self.assertNotIn("NPM_TOKEN", environment)
+        self.assertNotIn("NODE_AUTH_TOKEN", environment)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", environment)
+
+    def test_npm_subprocess_rejects_unapproved_environment_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                SAFE_UPDATE.RehearsalError,
+                "unsupported npm environment override: NPM_TOKEN",
+            ):
+                SAFE_UPDATE.run_npm_json(
+                    ["view", "openclaw@1.0.0", "--json"],
+                    Path(temporary),
+                    environment_overrides={"NPM_TOKEN": "must-not-pass"},
+                )
+
+    def test_npm_subprocess_rejects_nonempty_project_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            working_dir = Path(temporary)
+            (working_dir / ".npmrc").write_text(
+                "//registry.npmjs.org/:_authToken=must-not-load\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                SAFE_UPDATE.RehearsalError,
+                "non-empty project .npmrc",
+            ):
+                SAFE_UPDATE.run_npm_json(
+                    ["view", "openclaw@1.0.0", "--json"],
+                    working_dir,
+                    working_dir=working_dir,
+                )
 
     def test_status_decision_is_stable_across_volatile_run_envelopes(self) -> None:
         evidence_status = {
@@ -2866,6 +2944,7 @@ class SafeUpdateTest(unittest.TestCase):
 
     def test_public_product_surface_preserves_rehearsal_boundary(self) -> None:
         readme = README.read_text(encoding="utf-8")
+        skill = SKILL.read_text(encoding="utf-8")
         self.assertIn("OpenClaw Safe Upgrade Rehearsal Kit", readme)
         self.assertIn("openclaw skills install git:pdurlej/openclaw-skill-safe-update@main", readme)
         self.assertIn("openclaw skills info openclaw-safe-update", readme)
@@ -2884,6 +2963,12 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertIn("post-upgrade-e2e.json", readme)
         self.assertIn("optional model reviewers stay\noutside the verdict path", readme)
         self.assertIn("scripts/openclaw_advisory.py prepare", readme)
+        self.assertIn("--advisory-pass-env NAME", readme)
+        self.assertIn(
+            'metadata: {"openclaw":{"homepage":"https://github.com/pdurlej/'
+            'openclaw-skill-safe-update","requires":{"bins":["python3","node","npm"]}}}',
+            skill,
+        )
         self.assertIn("upgrade-experience.yml", readme)
         self.assertIn("MIT License", LICENSE.read_text(encoding="utf-8"))
         issue_template = UPGRADE_ISSUE_TEMPLATE.read_text(encoding="utf-8")
@@ -2898,7 +2983,7 @@ class SafeUpdateTest(unittest.TestCase):
         validate_workflow = VALIDATE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("clawhub@0.23.1 skill publish", validate_workflow)
         self.assertIn("--slug safe-upgrade-rehearsal", validate_workflow)
-        self.assertIn("--version 1.3.0", validate_workflow)
+        self.assertIn("--version 1.3.1", validate_workflow)
         self.assertNotIn("--slug openclaw-", validate_workflow)
         self.assertIn("--dry-run", validate_workflow)
         self.assertNotIn("CLAWHUB_TOKEN", validate_workflow)
