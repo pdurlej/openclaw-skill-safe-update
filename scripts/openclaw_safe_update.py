@@ -4692,7 +4692,7 @@ def validate_kova_bundle(
                 if len(payload) != size or hashlib.sha256(payload).hexdigest() != digest:
                     raise KovaEvidenceImportError("bundle-member-digest-mismatch")
                 indexed_total += size
-                if path == report_path.name:
+                if path in {report_path.name, "report.json"}:
                     report_matches += 1
                     if payload != report_payload:
                         raise KovaEvidenceImportError("bundled-report-mismatch")
@@ -4825,6 +4825,44 @@ def validate_kova_target_identity(
         "identity_kind": identity_kind,
         "identity_digest": identity_digest,
     }, [], []
+
+
+def validate_kova_environment(
+    report: dict[str, Any],
+    candidate_lock: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    target = candidate_lock.get("target")
+    expected = target.get("environment") if isinstance(target, dict) else None
+    if not isinstance(expected, dict) or set(expected) != {
+        "node_version",
+        "npm_version",
+        "os",
+        "arch",
+        "libc",
+    }:
+        raise KovaEvidenceImportError("candidate-lock-invalid")
+    platform_value = report.get("platform")
+    if not isinstance(platform_value, dict):
+        return ["target-environment"], ["target-environment-incomplete"]
+    observed = {
+        "node_version": platform_value.get("node"),
+        "npm_version": platform_value.get("npm"),
+        "os": platform_value.get("os"),
+        "arch": platform_value.get("arch"),
+        "libc": platform_value.get("libc"),
+    }
+    if isinstance(observed["node_version"], str):
+        observed["node_version"] = observed["node_version"].removeprefix("v")
+    if any(
+        isinstance(observed[key], str)
+        and bool(observed[key])
+        and observed[key] != expected[key]
+        for key in observed
+    ):
+        return [], ["target-environment-mismatch"]
+    if any(not isinstance(value, str) or not value for value in observed.values()):
+        return ["target-environment"], ["target-environment-incomplete"]
+    return [], []
 
 
 def aggregate_kova_scenarios(
@@ -5123,13 +5161,22 @@ def kova_evidence(args: argparse.Namespace) -> int:
         candidate_binding.update(identity)
         missing.extend(identity_missing)
         errors.extend(identity_errors)
+        environment_missing, environment_errors = validate_kova_environment(
+            report_raw,
+            candidate_raw,
+        )
+        missing.extend(environment_missing)
+        errors.extend(environment_errors)
         scenarios, scenario_missing, scenario_errors = aggregate_kova_scenarios(
             report_raw,
             policy,
         )
         missing.extend(scenario_missing)
         errors.extend(scenario_errors)
-        if candidate_binding["status"] == "mismatch":
+        if (
+            candidate_binding["status"] == "mismatch"
+            or "target-environment-mismatch" in errors
+        ):
             status_value = "rejected"
         elif missing or errors:
             status_value = "incomplete"

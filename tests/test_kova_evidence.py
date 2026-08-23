@@ -186,6 +186,7 @@ class KovaEvidenceTest(unittest.TestCase):
         malformed_ledger: bool = False,
         contradictory_ledger_summary: bool = False,
         arbitrary_evidence: bool = False,
+        platform: dict[str, str] | None | bool = True,
     ) -> Path:
         records = [
             self._record(scenario, (statuses or {}).get(scenario, "PASS"))
@@ -242,6 +243,16 @@ class KovaEvidenceTest(unittest.TestCase):
             "summary": summary,
             "records": records,
         }
+        if platform is True:
+            report["platform"] = {
+                "os": "linux",
+                "arch": "x64",
+                "libc": "glibc",
+                "node": "v22.14.0",
+                "npm": "11.4.2",
+            }
+        elif isinstance(platform, dict):
+            report["platform"] = platform
         if target_identity is not None:
             report["targetIdentity"] = target_identity
         report_path = self.root / "kova-run.json"
@@ -259,7 +270,7 @@ class KovaEvidenceTest(unittest.TestCase):
             }
         )
         files = {
-            report_path.name: report_payload,
+            "report.json": report_payload,
             "kova-run.summary.json": summary_payload,
             "manifest.json": manifest_payload,
         }
@@ -401,6 +412,55 @@ class KovaEvidenceTest(unittest.TestCase):
         document = self.read_output()
         self.assertEqual(document["status"], "incomplete")
         self.assertEqual(document["evidence_content"]["candidate_binding"]["status"], "version_only")
+
+    def test_missing_environment_identity_is_incomplete(self) -> None:
+        self.receipt = self._write_kova_run(platform=None)
+
+        result = self.run_import()
+
+        self.assertEqual(result.returncode, 2)
+        document = self.read_output()
+        self.assertEqual(document["status"], "incomplete")
+        self.assertIn(
+            "target-environment-incomplete",
+            document["evidence_content"]["error_codes"],
+        )
+
+    def test_environment_mismatch_is_rejected(self) -> None:
+        self.receipt = self._write_kova_run(
+            platform={
+                "os": "darwin",
+                "arch": "arm64",
+                "libc": "none",
+                "node": "v22.14.0",
+                "npm": "11.4.2",
+            }
+        )
+
+        result = self.run_import()
+
+        self.assertEqual(result.returncode, 2)
+        document = self.read_output()
+        self.assertEqual(document["status"], "rejected")
+        self.assertIn(
+            "target-environment-mismatch",
+            document["evidence_content"]["error_codes"],
+        )
+
+    def test_known_environment_mismatch_wins_over_missing_fields(self) -> None:
+        self.receipt = self._write_kova_run(
+            platform={"os": "darwin", "arch": "arm64", "node": "v22.14.0"}
+        )
+
+        result = self.run_import()
+
+        self.assertEqual(result.returncode, 2)
+        document = self.read_output()
+        self.assertEqual(document["status"], "rejected")
+        self.assertIn(
+            "target-environment-mismatch",
+            document["evidence_content"]["error_codes"],
+        )
 
     def test_each_negative_or_unknown_status_fails_closed(self) -> None:
         for status in ("FAIL", "BLOCKED", "INCOMPLETE", "SKIPPED", "DRY-RUN", "TIMED_OUT"):
