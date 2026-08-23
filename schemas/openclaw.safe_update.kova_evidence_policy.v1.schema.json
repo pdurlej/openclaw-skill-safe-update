@@ -31,7 +31,7 @@
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": {"enum": ["npm_integrity", "build_digest"]}
+          "items": {"const": "npm_integrity"}
         }
       },
       "additionalProperties": false

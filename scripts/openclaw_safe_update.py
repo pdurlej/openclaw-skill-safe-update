@@ -224,7 +224,7 @@ KOVA_RECORD_STATUSES = {
     "SKIPPED",
     "DRY-RUN",
 }
-KOVA_EXACT_IDENTITY_KINDS = {"npm_integrity", "build_digest"}
+KOVA_EXACT_IDENTITY_KINDS = {"npm_integrity"}
 KOVA_MAX_JSON_BYTES = 16 * 1024 * 1024
 KOVA_MAX_CHECKSUM_BYTES = 8 * 1024
 KOVA_MAX_BUNDLE_BYTES = 256 * 1024 * 1024
@@ -4455,7 +4455,7 @@ def validate_kova_candidate_lock(
         or len(artifact["integrity"]) > 1024
     ):
         raise KovaEvidenceImportError("candidate-binding-missing")
-    if not artifact["integrity"].startswith(("sha512-", "sha1-", "sha256:")):
+    if not valid_kova_npm_integrity(artifact["integrity"]):
         raise KovaEvidenceImportError("candidate-binding-missing")
     package_identity = artifact["identity"]
     if "@" not in package_identity:
@@ -4464,6 +4464,17 @@ def validate_kova_candidate_lock(
     if package_name != binding["artifact_ref"] or not VERSION_RE.fullmatch(package_version):
         raise KovaEvidenceImportError("candidate-binding-mismatch")
     return target_root, artifact
+
+
+def valid_kova_npm_integrity(value: Any) -> bool:
+    if not isinstance(value, str) or not value.startswith("sha512-"):
+        return False
+    encoded = value.removeprefix("sha512-")
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        return False
+    return len(decoded) == hashlib.sha512().digest_size
 
 
 def resolve_kova_artifact_path(receipt_path: Path, value: Any) -> Path:
@@ -4759,11 +4770,6 @@ def validate_kova_target_identity(
     matches = False
     if identity_kind == "npm_integrity":
         matches = hmac.compare_digest(exact_value, artifact["integrity"])
-    elif identity_kind == "build_digest" and artifact["integrity"].startswith("sha256:"):
-        matches = hmac.compare_digest(
-            exact_value.removeprefix("sha256:"),
-            artifact["integrity"].removeprefix("sha256:"),
-        )
     if not matches:
         return {
             "status": "mismatch",
@@ -4803,19 +4809,42 @@ def aggregate_kova_scenarios(
             valid_entries = (
                 isinstance(entries, list)
                 and bool(entries)
-                and all(isinstance(item, dict) for item in entries)
+                and all(
+                    isinstance(item, dict)
+                    and kova_safe_identifier(item.get("id")) is not None
+                    and kova_safe_identifier(item.get("category")) is not None
+                    and isinstance(item.get("required"), bool)
+                    and item.get("status") in {"passed", "failed", "missing", "skipped"}
+                    for item in entries
+                )
             )
             required_entries = (
                 [item for item in entries if item.get("required") is True]
                 if valid_entries
                 else []
             )
+            expected_summary: dict[str, Any] | None = None
+            if valid_entries:
+                by_status: dict[str, int] = {}
+                by_category: dict[str, int] = {}
+                for item in entries:
+                    by_status[item["status"]] = by_status.get(item["status"], 0) + 1
+                    by_category[item["category"]] = by_category.get(item["category"], 0) + 1
+                expected_summary = {
+                    "total": len(entries),
+                    "required": len(required_entries),
+                    "requiredMissing": sum(item["status"] == "missing" for item in required_entries),
+                    "requiredFailed": sum(item["status"] == "failed" for item in required_entries),
+                    "byStatus": dict(sorted(by_status.items())),
+                    "byCategory": dict(sorted(by_category.items())),
+                }
             if (
                 ledger.get("schemaVersion") == "kova.evidenceLedger.v1"
                 and ledger.get("completeness") == "complete"
                 and valid_entries
                 and bool(required_entries)
                 and all(item.get("status") == "passed" for item in required_entries)
+                and ledger.get("summary") == expected_summary
             ):
                 ledger_status = "complete"
             else:
