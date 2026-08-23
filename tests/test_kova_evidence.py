@@ -77,7 +77,7 @@ class KovaEvidenceTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def _write_candidate_lock(self) -> None:
+    def _write_candidate_lock(self, artifact_identity: str = "openclaw@1.1.0") -> None:
         target_content = {
             "schema": "openclaw.safe_update.installation_candidate.v1",
             "lane": "target",
@@ -101,7 +101,7 @@ class KovaEvidenceTest(unittest.TestCase):
                         {
                             "kind": "npm_package",
                             "ref": "openclaw",
-                            "identity": "openclaw@1.1.0",
+                            "identity": artifact_identity,
                             "integrity": self.identity["npmIntegrity"],
                         }
                     ],
@@ -166,12 +166,20 @@ class KovaEvidenceTest(unittest.TestCase):
         report_schema: str = "kova.report.v1",
         publication_omission: bool = False,
         corrupt_indexed_member: bool = False,
+        empty_ledgers: bool = False,
+        malformed_ledger: bool = False,
     ) -> Path:
         records = [
             self._record(scenario, (statuses or {}).get(scenario, "PASS"))
             for scenario in REQUIRED_SCENARIOS
             if scenario != omit_scenario
         ]
+        if empty_ledgers:
+            for record in records:
+                record["evidenceLedger"]["entries"] = []
+                record["evidenceLedger"]["summary"] = {"required": 0, "byStatus": {}}
+        if malformed_ledger:
+            records[0]["evidenceLedger"]["entries"] = [None]
         counts: dict[str, int] = {}
         for record in records:
             status = str(record["status"])
@@ -396,6 +404,44 @@ class KovaEvidenceTest(unittest.TestCase):
         document = self.read_output()
         self.assertEqual(document["status"], "rejected")
         self.assertEqual(document["evidence_content"]["candidate_binding"]["status"], "mismatch")
+
+    def test_empty_evidence_ledgers_cannot_produce_gate_evidence(self) -> None:
+        self.receipt = self._write_kova_run(empty_ledgers=True)
+
+        result = self.run_import()
+
+        self.assertEqual(result.returncode, 2)
+        document = self.read_output()
+        self.assertEqual(document["status"], "incomplete")
+        self.assertEqual(document["evidence_content"]["eligible_gates"], [])
+
+    def test_malformed_evidence_ledger_entry_is_rejected_without_crashing(self) -> None:
+        self.receipt = self._write_kova_run(malformed_ledger=True)
+
+        result = self.run_import()
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.read_output()["status"], "incomplete")
+
+    def test_candidate_lock_package_coordinate_must_match_policy_ref(self) -> None:
+        self._write_candidate_lock(artifact_identity="attacker@1.1.0")
+
+        result = self.run_import()
+
+        self.assertEqual(result.returncode, 2)
+        document = self.read_output()
+        self.assertEqual(document["status"], "rejected")
+        self.assertIn("candidate-binding-mismatch", document["evidence_content"]["error_codes"])
+
+    def test_policy_cannot_advertise_unverifiable_git_sha_binding(self) -> None:
+        policy = json.loads(self.policy.read_text(encoding="utf-8"))
+        policy["target_binding"]["accepted_identity_kinds"] = ["git_sha"]
+        self.policy.write_bytes(json_bytes(policy))
+
+        result = self.run_import()
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.read_output()["status"], "rejected")
 
     def test_bundle_member_tamper_is_rejected_even_with_fresh_outer_checksum(self) -> None:
         self.receipt = self._write_kova_run(corrupt_indexed_member=True)

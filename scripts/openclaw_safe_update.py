@@ -224,7 +224,7 @@ KOVA_RECORD_STATUSES = {
     "SKIPPED",
     "DRY-RUN",
 }
-KOVA_EXACT_IDENTITY_KINDS = {"npm_integrity", "git_sha", "build_digest"}
+KOVA_EXACT_IDENTITY_KINDS = {"npm_integrity", "build_digest"}
 KOVA_MAX_JSON_BYTES = 16 * 1024 * 1024
 KOVA_MAX_CHECKSUM_BYTES = 8 * 1024
 KOVA_MAX_BUNDLE_BYTES = 256 * 1024 * 1024
@@ -4457,6 +4457,12 @@ def validate_kova_candidate_lock(
         raise KovaEvidenceImportError("candidate-binding-missing")
     if not artifact["integrity"].startswith(("sha512-", "sha1-", "sha256:")):
         raise KovaEvidenceImportError("candidate-binding-missing")
+    package_identity = artifact["identity"]
+    if "@" not in package_identity:
+        raise KovaEvidenceImportError("candidate-binding-missing")
+    package_name, package_version = package_identity.rsplit("@", 1)
+    if package_name != binding["artifact_ref"] or not VERSION_RE.fullmatch(package_version):
+        raise KovaEvidenceImportError("candidate-binding-mismatch")
     return target_root, artifact
 
 
@@ -4794,16 +4800,22 @@ def aggregate_kova_scenarios(
         if isinstance(ledger, dict):
             ledger_digest = canonical_digest(ledger)
             entries = ledger.get("entries")
+            valid_entries = (
+                isinstance(entries, list)
+                and bool(entries)
+                and all(isinstance(item, dict) for item in entries)
+            )
+            required_entries = (
+                [item for item in entries if item.get("required") is True]
+                if valid_entries
+                else []
+            )
             if (
                 ledger.get("schemaVersion") == "kova.evidenceLedger.v1"
                 and ledger.get("completeness") == "complete"
-                and isinstance(entries, list)
-                and all(
-                    isinstance(item, dict)
-                    and item.get("status") == "passed"
-                    for item in entries
-                    if item.get("required") is True
-                )
+                and valid_entries
+                and bool(required_entries)
+                and all(item.get("status") == "passed" for item in required_entries)
             ):
                 ledger_status = "complete"
             else:
