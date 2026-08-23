@@ -2,7 +2,6 @@
   "schema": "openclaw.safe_update.kova_evidence_policy.v1",
   "policy_id": "kova-openclaw-core-execution-v1",
   "supported_receipt_schemas": [
-    "kova.run.receipt.v1",
     "kova.matrix.run.receipt.v1"
   ],
   "supported_report_schemas": ["kova.report.v1"],

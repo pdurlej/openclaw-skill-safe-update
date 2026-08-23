@@ -37,7 +37,7 @@
           "required": ["receipt_schema", "receipt_sha256", "report_schema", "report_sha256", "bundle_sha256", "artifact_index_sha256", "run_id", "mode"],
           "properties": {
             "receipt_schema": {"type": "string", "minLength": 1},
-            "receipt_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "receipt_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
             "report_schema": {"type": ["string", "null"], "minLength": 1},
             "report_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
             "bundle_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
