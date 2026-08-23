@@ -210,6 +210,27 @@ GATE_EVIDENCE_IDS = frozenset(
         "environment-matched-rehearsal",
     }
 )
+KOVA_EVIDENCE_SCHEMA = "openclaw.safe_update.kova_evidence.v1"
+KOVA_EVIDENCE_POLICY_SCHEMA = "openclaw.safe_update.kova_evidence_policy.v1"
+KOVA_RECEIPT_SCHEMA = "kova.matrix.run.receipt.v1"
+KOVA_REPORT_SCHEMA = "kova.report.v1"
+KOVA_ARTIFACT_INDEX_SCHEMA = "kova.artifact.index.v1"
+KOVA_TARGET_IDENTITY_SCHEMA = "kova.target.identity.v1"
+KOVA_RECORD_STATUSES = {
+    "PASS",
+    "FAIL",
+    "INCOMPLETE",
+    "BLOCKED",
+    "SKIPPED",
+    "DRY-RUN",
+}
+KOVA_EXACT_IDENTITY_KINDS = {"npm_integrity"}
+KOVA_MAX_JSON_BYTES = 16 * 1024 * 1024
+KOVA_MAX_CHECKSUM_BYTES = 8 * 1024
+KOVA_MAX_BUNDLE_BYTES = 256 * 1024 * 1024
+KOVA_MAX_BUNDLE_ENTRIES = 10_000
+KOVA_MAX_BUNDLE_DECLARED_BYTES = 512 * 1024 * 1024
+KOVA_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,255}$")
 CONSERVATIVE_CONDITION_IDS = frozenset(
     {
         "candidate-closure-resolved",
@@ -1114,6 +1135,17 @@ def resolve_core_closure(
 
 def registry_metadata(package: str, version: str, cache_dir: Path) -> dict[str, Any]:
     value = run_npm_json(["view", f"{package}@{version}", "--json"], cache_dir)
+    if isinstance(value, list):
+        matches = [
+            item
+            for item in value
+            if isinstance(item, dict)
+            and item.get("name") == package
+            and item.get("version") == version
+        ]
+        if len(matches) != 1:
+            raise RehearsalError(f"registry metadata mismatch for {package}@{version}")
+        value = matches[0]
     if not isinstance(value, dict) or value.get("name") != package or value.get("version") != version:
         raise RehearsalError(f"registry metadata mismatch for {package}@{version}")
     dist = value.get("dist")
@@ -1133,6 +1165,14 @@ def pack_archive(package: str, version: str, destination: Path, cache_dir: Path)
         ["pack", f"{package}@{version}", "--json", "--pack-destination", str(destination)],
         cache_dir,
     )
+    if isinstance(value, dict):
+        value = [
+            item
+            for item in value.values()
+            if isinstance(item, dict)
+            and item.get("name") == package
+            and item.get("version") == version
+        ]
     if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
         raise RehearsalError(f"unexpected npm pack result for {package}@{version}")
     filename = value[0].get("filename")
@@ -4232,6 +4272,963 @@ def archive_timeout_argument(value: str) -> float:
     return timeout
 
 
+class KovaEvidenceImportError(RuntimeError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def kova_sha256_bytes(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def kova_safe_identifier(value: Any) -> str | None:
+    if isinstance(value, str) and KOVA_SAFE_ID_RE.fullmatch(value):
+        return value
+    return None
+
+
+def read_bounded_regular_bytes(path: Path, limit: int, error_code: str) -> bytes:
+    try:
+        metadata = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+            raise KovaEvidenceImportError(error_code)
+        if metadata.st_size > limit:
+            raise KovaEvidenceImportError(error_code)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size > limit:
+                raise KovaEvidenceImportError(error_code)
+            payload = bytearray()
+            while True:
+                chunk = os.read(descriptor, min(1024 * 1024, limit + 1 - len(payload)))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+                if len(payload) > limit:
+                    raise KovaEvidenceImportError(error_code)
+            return bytes(payload)
+        finally:
+            os.close(descriptor)
+    except KovaEvidenceImportError:
+        raise
+    except OSError as exc:
+        raise KovaEvidenceImportError(error_code) from exc
+
+
+def parse_bounded_json(path: Path, error_code: str) -> tuple[Any, bytes]:
+    payload = read_bounded_regular_bytes(path, KOVA_MAX_JSON_BYTES, error_code)
+    try:
+        return json.loads(payload.decode("utf-8")), payload
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise KovaEvidenceImportError(error_code) from exc
+
+
+def validate_kova_policy(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "policy_id",
+        "supported_receipt_schemas",
+        "supported_report_schemas",
+        "required_mode",
+        "target_binding",
+        "reject_publication_omissions",
+        "scenarios",
+    }:
+        raise KovaEvidenceImportError("policy-invalid")
+    if value.get("schema") != KOVA_EVIDENCE_POLICY_SCHEMA:
+        raise KovaEvidenceImportError("policy-invalid")
+    policy_id = kova_safe_identifier(value.get("policy_id"))
+    if policy_id is None:
+        raise KovaEvidenceImportError("policy-invalid")
+
+    def schema_list(field: str) -> list[str]:
+        items = value.get(field)
+        if (
+            not isinstance(items, list)
+            or not items
+            or any(kova_safe_identifier(item) is None for item in items)
+            or len(items) != len(set(items))
+        ):
+            raise KovaEvidenceImportError("policy-invalid")
+        return sorted(items)
+
+    receipts = schema_list("supported_receipt_schemas")
+    reports = schema_list("supported_report_schemas")
+    if receipts != [KOVA_RECEIPT_SCHEMA] or reports != [KOVA_REPORT_SCHEMA]:
+        raise KovaEvidenceImportError("policy-invalid")
+    if value.get("required_mode") != "execution":
+        raise KovaEvidenceImportError("policy-invalid")
+    if value.get("reject_publication_omissions") is not True:
+        raise KovaEvidenceImportError("policy-invalid")
+
+    binding = value.get("target_binding")
+    if not isinstance(binding, dict) or set(binding) != {
+        "component_id",
+        "artifact_kind",
+        "artifact_ref",
+        "accepted_identity_kinds",
+    }:
+        raise KovaEvidenceImportError("policy-invalid")
+    if (
+        kova_safe_identifier(binding.get("component_id")) is None
+        or binding.get("artifact_kind") != "npm_package"
+        or kova_safe_identifier(binding.get("artifact_ref")) is None
+    ):
+        raise KovaEvidenceImportError("policy-invalid")
+    identity_kinds = binding.get("accepted_identity_kinds")
+    if (
+        not isinstance(identity_kinds, list)
+        or not identity_kinds
+        or len(identity_kinds) != len(set(identity_kinds))
+        or any(item not in KOVA_EXACT_IDENTITY_KINDS for item in identity_kinds)
+    ):
+        raise KovaEvidenceImportError("policy-invalid")
+
+    scenarios = value.get("scenarios")
+    if not isinstance(scenarios, list) or not scenarios:
+        raise KovaEvidenceImportError("policy-invalid")
+    normalized_scenarios: list[dict[str, Any]] = []
+    scenario_ids: set[str] = set()
+    for item in scenarios:
+        if not isinstance(item, dict) or set(item) != {"id", "gate_ids", "required_evidence"}:
+            raise KovaEvidenceImportError("policy-invalid")
+        scenario_id = kova_safe_identifier(item.get("id"))
+        gate_ids = item.get("gate_ids")
+        required_evidence = item.get("required_evidence")
+        if (
+            scenario_id is None
+            or scenario_id in scenario_ids
+            or not isinstance(gate_ids, list)
+            or not gate_ids
+            or len(gate_ids) != len(set(gate_ids))
+            or any(gate_id not in GATE_EVIDENCE_IDS for gate_id in gate_ids)
+            or not isinstance(required_evidence, list)
+            or not required_evidence
+        ):
+            raise KovaEvidenceImportError("policy-invalid")
+        normalized_evidence: list[dict[str, str]] = []
+        evidence_keys: set[tuple[str, str]] = set()
+        for evidence in required_evidence:
+            if not isinstance(evidence, dict) or set(evidence) != {"id", "category"}:
+                raise KovaEvidenceImportError("policy-invalid")
+            evidence_id = kova_safe_identifier(evidence.get("id"))
+            category = evidence.get("category")
+            key = (str(evidence_id), str(category))
+            if (
+                evidence_id is None
+                or category not in {"command", "invariant", "collector"}
+                or key in evidence_keys
+            ):
+                raise KovaEvidenceImportError("policy-invalid")
+            evidence_keys.add(key)
+            normalized_evidence.append({"id": evidence_id, "category": category})
+        scenario_ids.add(scenario_id)
+        normalized_scenarios.append(
+            {
+                "id": scenario_id,
+                "gate_ids": sorted(gate_ids),
+                "required_evidence": sorted(
+                    normalized_evidence, key=lambda evidence: (evidence["id"], evidence["category"])
+                ),
+            }
+        )
+    normalized_scenarios.sort(key=lambda item: item["id"])
+    return {
+        **value,
+        "supported_receipt_schemas": receipts,
+        "supported_report_schemas": reports,
+        "target_binding": {
+            **binding,
+            "accepted_identity_kinds": sorted(identity_kinds),
+        },
+        "scenarios": normalized_scenarios,
+    }
+
+
+def validate_kova_candidate_lock(
+    value: Any,
+    binding: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != INSTALLATION_CANDIDATE_LOCK_SCHEMA
+        or value.get("status") != "success"
+        or not isinstance(value.get("target"), dict)
+    ):
+        raise KovaEvidenceImportError("candidate-lock-invalid")
+    target = value["target"]
+    target_root = value.get("target_root")
+    if (
+        not isinstance(target_root, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", target_root)
+        or target.get("root") != target_root
+    ):
+        raise KovaEvidenceImportError("candidate-lock-invalid")
+    target_content = {key: item for key, item in target.items() if key != "root"}
+    if canonical_digest(target_content) != target_root:
+        raise KovaEvidenceImportError("candidate-lock-invalid")
+    components = target.get("components")
+    if not isinstance(components, list):
+        raise KovaEvidenceImportError("candidate-lock-invalid")
+    matching_components = [
+        item
+        for item in components
+        if isinstance(item, dict) and item.get("id") == binding["component_id"]
+    ]
+    if len(matching_components) != 1:
+        raise KovaEvidenceImportError("candidate-binding-missing")
+    artifacts = matching_components[0].get("artifacts")
+    if not isinstance(artifacts, list):
+        raise KovaEvidenceImportError("candidate-binding-missing")
+    matching_artifacts = [
+        item
+        for item in artifacts
+        if isinstance(item, dict)
+        and item.get("kind") == binding["artifact_kind"]
+        and item.get("ref") == binding["artifact_ref"]
+    ]
+    if len(matching_artifacts) != 1:
+        raise KovaEvidenceImportError("candidate-binding-missing")
+    artifact = matching_artifacts[0]
+    if (
+        kova_safe_identifier(artifact.get("identity")) is None
+        or not isinstance(artifact.get("integrity"), str)
+        or len(artifact["integrity"]) > 1024
+    ):
+        raise KovaEvidenceImportError("candidate-binding-missing")
+    if not valid_kova_npm_integrity(artifact["integrity"]):
+        raise KovaEvidenceImportError("candidate-binding-missing")
+    package_identity = artifact["identity"]
+    if "@" not in package_identity:
+        raise KovaEvidenceImportError("candidate-binding-missing")
+    package_name, package_version = package_identity.rsplit("@", 1)
+    if package_name != binding["artifact_ref"] or not VERSION_RE.fullmatch(package_version):
+        raise KovaEvidenceImportError("candidate-binding-mismatch")
+    return target_root, artifact
+
+
+def valid_kova_npm_integrity(value: Any) -> bool:
+    if not isinstance(value, str) or not value.startswith("sha512-"):
+        return False
+    encoded = value.removeprefix("sha512-")
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        return False
+    return len(decoded) == hashlib.sha512().digest_size
+
+
+def resolve_kova_artifact_path(receipt_path: Path, value: Any) -> Path:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise KovaEvidenceImportError("receipt-artifact-reference-invalid")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = receipt_path.parent / candidate
+    return Path(os.path.abspath(candidate))
+
+
+def validate_kova_checksum(bundle_path: Path, checksum_path: Path) -> str:
+    read_bounded_regular_bytes(
+        bundle_path,
+        KOVA_MAX_BUNDLE_BYTES,
+        "bundle-unreadable",
+    )
+    checksum_payload = read_bounded_regular_bytes(
+        checksum_path,
+        KOVA_MAX_CHECKSUM_BYTES,
+        "checksum-invalid",
+    )
+    try:
+        checksum_text = checksum_payload.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise KovaEvidenceImportError("checksum-invalid") from exc
+    match = re.fullmatch(r"([0-9a-f]{64})  ([^/\\\r\n]+)\r?\n?", checksum_text)
+    if match is None or match.group(2) != bundle_path.name:
+        raise KovaEvidenceImportError("checksum-invalid")
+    observed = digest_file(bundle_path)
+    if not hmac.compare_digest(observed, match.group(1)):
+        raise KovaEvidenceImportError("bundle-checksum-mismatch")
+    return "sha256:" + observed
+
+
+def safe_kova_archive_name(value: Any) -> str | None:
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 4096:
+        return None
+    if value.startswith("/") or "\\" in value or any(ord(char) < 32 for char in value):
+        return None
+    parts = value.split("/")
+    if len(parts) > 64 or any(not part or part in {".", ".."} for part in parts):
+        return None
+    if PurePosixPath(value).as_posix() != value:
+        return None
+    return value
+
+
+def read_kova_tar_member(
+    archive: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    limit: int,
+) -> bytes:
+    if not member.isfile() or member.size < 0 or member.size > limit:
+        raise KovaEvidenceImportError("bundle-member-invalid")
+    handle = archive.extractfile(member)
+    if handle is None:
+        raise KovaEvidenceImportError("bundle-member-invalid")
+    payload = handle.read(limit + 1)
+    if len(payload) != member.size or len(payload) > limit:
+        raise KovaEvidenceImportError("bundle-member-invalid")
+    return payload
+
+
+def validate_kova_bundle(
+    bundle_path: Path,
+    report_path: Path,
+    report_payload: bytes,
+    reject_publication_omissions: bool,
+) -> tuple[str, bytes]:
+    try:
+        with tarfile.open(bundle_path, mode="r:gz") as archive:
+            file_members: dict[str, tarfile.TarInfo] = {}
+            total_declared = 0
+            physical_count = 0
+            for member in archive.getmembers():
+                physical_count += 1
+                if physical_count > KOVA_MAX_BUNDLE_ENTRIES:
+                    raise KovaEvidenceImportError("bundle-member-limit")
+                if safe_kova_archive_name(member.name) is None:
+                    raise KovaEvidenceImportError("bundle-member-invalid")
+                if member.isdir():
+                    continue
+                if not member.isfile() or member.name in file_members:
+                    raise KovaEvidenceImportError("bundle-member-invalid")
+                total_declared += member.size
+                if total_declared > KOVA_MAX_BUNDLE_DECLARED_BYTES:
+                    raise KovaEvidenceImportError("bundle-member-limit")
+                file_members[member.name] = member
+
+            index_names = [
+                name for name in file_members if name.endswith("/artifact-index.json")
+            ]
+            if len(index_names) != 1:
+                raise KovaEvidenceImportError("artifact-index-missing")
+            index_name = index_names[0]
+            index_payload = read_kova_tar_member(
+                archive,
+                file_members[index_name],
+                KOVA_MAX_JSON_BYTES,
+            )
+            try:
+                index = json.loads(index_payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise KovaEvidenceImportError("artifact-index-invalid") from exc
+            if not isinstance(index, dict) or index.get("schemaVersion") != KOVA_ARTIFACT_INDEX_SCHEMA:
+                raise KovaEvidenceImportError("artifact-index-invalid")
+            bundle_root = safe_kova_archive_name(index.get("bundleRoot"))
+            entries = index.get("entries")
+            omissions = index.get("publicationOmissions")
+            if (
+                bundle_root is None
+                or "/" in bundle_root
+                or index_name != f"{bundle_root}/artifact-index.json"
+                or not isinstance(entries, list)
+                or len(entries) > KOVA_MAX_BUNDLE_ENTRIES
+                or not isinstance(omissions, dict)
+            ):
+                raise KovaEvidenceImportError("artifact-index-invalid")
+            omission_entries = omissions.get("entries")
+            if (
+                not isinstance(omissions.get("fileCount"), int)
+                or not isinstance(omissions.get("totalBytes"), int)
+                or not isinstance(omission_entries, list)
+                or omissions["fileCount"] != len(omission_entries)
+            ):
+                raise KovaEvidenceImportError("artifact-index-invalid")
+            if reject_publication_omissions and (
+                omissions["fileCount"] != 0
+                or omissions["totalBytes"] != 0
+                or omission_entries
+            ):
+                raise KovaEvidenceImportError("publication-omission")
+
+            indexed_names: set[str] = set()
+            indexed_paths: set[str] = set()
+            indexed_total = 0
+            report_matches = 0
+            for entry in entries:
+                if not isinstance(entry, dict) or set(entry) != {
+                    "path",
+                    "archivePath",
+                    "bytes",
+                    "sha256",
+                }:
+                    raise KovaEvidenceImportError("artifact-index-invalid")
+                path = safe_kova_archive_name(entry.get("path"))
+                archive_path = safe_kova_archive_name(entry.get("archivePath"))
+                size = entry.get("bytes")
+                digest = entry.get("sha256")
+                if (
+                    path is None
+                    or archive_path is None
+                    or path in indexed_paths
+                    or not isinstance(size, int)
+                    or size < 0
+                    or not isinstance(digest, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                ):
+                    raise KovaEvidenceImportError("artifact-index-invalid")
+                indexed_paths.add(path)
+                member_name = f"{bundle_root}/{archive_path}"
+                if member_name in indexed_names or member_name not in file_members:
+                    raise KovaEvidenceImportError("artifact-index-invalid")
+                indexed_names.add(member_name)
+                payload = read_kova_tar_member(
+                    archive,
+                    file_members[member_name],
+                    KOVA_MAX_BUNDLE_DECLARED_BYTES,
+                )
+                if len(payload) != size or hashlib.sha256(payload).hexdigest() != digest:
+                    raise KovaEvidenceImportError("bundle-member-digest-mismatch")
+                indexed_total += size
+                if path in {report_path.name, "report.json"}:
+                    report_matches += 1
+                    if payload != report_payload:
+                        raise KovaEvidenceImportError("bundled-report-mismatch")
+            if (
+                index.get("fileCount") != len(entries)
+                or index.get("totalBytes") != indexed_total
+                or report_matches != 1
+                or set(file_members) != indexed_names | {index_name}
+            ):
+                raise KovaEvidenceImportError("artifact-index-incomplete")
+            return kova_sha256_bytes(index_payload), index_payload
+    except KovaEvidenceImportError:
+        raise
+    except (OSError, tarfile.TarError, EOFError) as exc:
+        raise KovaEvidenceImportError("bundle-invalid") from exc
+
+
+def normalize_kova_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"total", "statuses"}:
+        raise KovaEvidenceImportError("summary-invalid")
+    total = value.get("total")
+    statuses = value.get("statuses")
+    if (
+        not isinstance(total, int)
+        or total < 0
+        or not isinstance(statuses, dict)
+        or any(
+            status not in KOVA_RECORD_STATUSES
+            or not isinstance(count, int)
+            or count < 0
+            for status, count in statuses.items()
+        )
+        or sum(statuses.values()) != total
+    ):
+        raise KovaEvidenceImportError("summary-invalid")
+    return {"total": total, "statuses": dict(sorted(statuses.items()))}
+
+
+def validate_kova_target_identity(
+    receipt: dict[str, Any],
+    report: dict[str, Any],
+    artifact: dict[str, Any],
+    accepted_kinds: list[str],
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    receipt_identity = receipt.get("targetIdentity")
+    report_identity = report.get("targetIdentity")
+    if receipt_identity is None and report_identity is None:
+        return {
+            "status": "missing",
+            "identity_kind": None,
+            "identity_digest": None,
+        }, ["target-identity"], ["target-identity-missing"]
+    if receipt_identity is None or report_identity is None:
+        return {
+            "status": "missing",
+            "identity_kind": None,
+            "identity_digest": None,
+        }, ["target-identity"], ["target-identity-incomplete"]
+    if receipt_identity != report_identity:
+        raise KovaEvidenceImportError("target-identity-disagreement")
+    identity = receipt_identity
+    if not isinstance(identity, dict) or set(identity) != {
+        "schemaVersion",
+        "requestedSelector",
+        "resolvedVersion",
+        "npmIntegrity",
+        "gitSha",
+        "buildDigest",
+    }:
+        raise KovaEvidenceImportError("target-identity-invalid")
+    if identity.get("schemaVersion") != KOVA_TARGET_IDENTITY_SCHEMA:
+        raise KovaEvidenceImportError("target-identity-invalid")
+    requested = identity.get("requestedSelector")
+    resolved = identity.get("resolvedVersion")
+    if kova_safe_identifier(requested) is None or not isinstance(resolved, str) or not VERSION_RE.fullmatch(resolved):
+        raise KovaEvidenceImportError("target-identity-invalid")
+    artifact_identity = artifact["identity"]
+    if "@" not in artifact_identity:
+        raise KovaEvidenceImportError("candidate-binding-missing")
+    candidate_version = artifact_identity.rsplit("@", 1)[1]
+    if resolved != candidate_version or requested != f"npm:{candidate_version}":
+        return {
+            "status": "mismatch",
+            "identity_kind": None,
+            "identity_digest": canonical_digest(identity),
+        }, [], ["target-identity-mismatch"]
+    if report.get("target") != requested:
+        return {
+            "status": "mismatch",
+            "identity_kind": None,
+            "identity_digest": canonical_digest(identity),
+        }, [], ["target-identity-mismatch"]
+
+    exact_values = {
+        "npm_integrity": identity.get("npmIntegrity"),
+        "git_sha": identity.get("gitSha"),
+        "build_digest": identity.get("buildDigest"),
+    }
+    populated = [kind for kind, item in exact_values.items() if item is not None]
+    identity_digest = canonical_digest(identity)
+    if not populated:
+        return {
+            "status": "version_only",
+            "identity_kind": None,
+            "identity_digest": identity_digest,
+        }, ["target-identity-exact"], ["target-identity-version-only"]
+    if len(populated) != 1:
+        raise KovaEvidenceImportError("target-identity-invalid")
+    identity_kind = populated[0]
+    exact_value = exact_values[identity_kind]
+    if not isinstance(exact_value, str) or not exact_value or len(exact_value) > 1024:
+        raise KovaEvidenceImportError("target-identity-invalid")
+    if identity_kind not in accepted_kinds:
+        return {
+            "status": "version_only",
+            "identity_kind": identity_kind,
+            "identity_digest": identity_digest,
+        }, ["target-identity-kind"], ["target-identity-kind-not-accepted"]
+    matches = False
+    if identity_kind == "npm_integrity":
+        matches = hmac.compare_digest(exact_value, artifact["integrity"])
+    if not matches:
+        return {
+            "status": "mismatch",
+            "identity_kind": identity_kind,
+            "identity_digest": identity_digest,
+        }, [], ["target-identity-mismatch"]
+    return {
+        "status": "exact",
+        "identity_kind": identity_kind,
+        "identity_digest": identity_digest,
+    }, [], []
+
+
+def validate_kova_environment(
+    report: dict[str, Any],
+    candidate_lock: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    target = candidate_lock.get("target")
+    expected = target.get("environment") if isinstance(target, dict) else None
+    if not isinstance(expected, dict) or set(expected) != {
+        "node_version",
+        "npm_version",
+        "os",
+        "arch",
+        "libc",
+    }:
+        raise KovaEvidenceImportError("candidate-lock-invalid")
+    platform_value = report.get("platform")
+    if not isinstance(platform_value, dict):
+        return ["target-environment"], ["target-environment-incomplete"]
+    observed = {
+        "node_version": platform_value.get("node"),
+        "npm_version": platform_value.get("npm"),
+        "os": platform_value.get("os"),
+        "arch": platform_value.get("arch"),
+        "libc": platform_value.get("libc"),
+    }
+    if isinstance(observed["node_version"], str):
+        observed["node_version"] = observed["node_version"].removeprefix("v")
+    if any(
+        isinstance(observed[key], str)
+        and bool(observed[key])
+        and observed[key] != expected[key]
+        for key in observed
+    ):
+        return [], ["target-environment-mismatch"]
+    if any(not isinstance(value, str) or not value for value in observed.values()):
+        return ["target-environment"], ["target-environment-incomplete"]
+    return [], []
+
+
+def aggregate_kova_scenarios(
+    report: dict[str, Any],
+    policy: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    records = report.get("records")
+    if not isinstance(records, list):
+        raise KovaEvidenceImportError("records-invalid")
+    normalized_records: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise KovaEvidenceImportError("records-invalid")
+        scenario = kova_safe_identifier(record.get("scenario"))
+        status_value = record.get("status")
+        if scenario is None or status_value not in KOVA_RECORD_STATUSES:
+            raise KovaEvidenceImportError("record-status-invalid")
+        status_counts[status_value] = status_counts.get(status_value, 0) + 1
+        ledger = record.get("evidenceLedger")
+        ledger_status = "missing"
+        ledger_digest = None
+        passed_evidence: set[tuple[str, str]] = set()
+        if isinstance(ledger, dict):
+            ledger_digest = canonical_digest(ledger)
+            entries = ledger.get("entries")
+            valid_entries = (
+                isinstance(entries, list)
+                and bool(entries)
+                and all(
+                    isinstance(item, dict)
+                    and kova_safe_identifier(item.get("id")) is not None
+                    and kova_safe_identifier(item.get("category")) is not None
+                    and isinstance(item.get("required"), bool)
+                    and item.get("status") in {"passed", "failed", "missing", "skipped"}
+                    for item in entries
+                )
+            )
+            required_entries = (
+                [item for item in entries if item.get("required") is True]
+                if valid_entries
+                else []
+            )
+            expected_summary: dict[str, Any] | None = None
+            if valid_entries:
+                by_status: dict[str, int] = {}
+                by_category: dict[str, int] = {}
+                for item in entries:
+                    by_status[item["status"]] = by_status.get(item["status"], 0) + 1
+                    by_category[item["category"]] = by_category.get(item["category"], 0) + 1
+                expected_summary = {
+                    "total": len(entries),
+                    "required": len(required_entries),
+                    "requiredMissing": sum(item["status"] == "missing" for item in required_entries),
+                    "requiredFailed": sum(item["status"] == "failed" for item in required_entries),
+                    "byStatus": dict(sorted(by_status.items())),
+                    "byCategory": dict(sorted(by_category.items())),
+                }
+            if (
+                ledger.get("schemaVersion") == "kova.evidenceLedger.v1"
+                and ledger.get("completeness") == "complete"
+                and valid_entries
+                and bool(required_entries)
+                and all(item.get("status") == "passed" for item in required_entries)
+                and ledger.get("summary") == expected_summary
+            ):
+                ledger_status = "complete"
+                passed_evidence = {
+                    (item["id"], item["category"])
+                    for item in required_entries
+                    if item["status"] == "passed"
+                }
+            else:
+                ledger_status = "incomplete"
+        normalized_records.append(
+            {
+                "scenario": scenario,
+                "status": status_value,
+                "ledger_status": ledger_status,
+                "ledger_digest": ledger_digest,
+                "passed_evidence": passed_evidence,
+            }
+        )
+    summary = normalize_kova_summary(report.get("summary"))
+    if summary != {"total": len(records), "statuses": dict(sorted(status_counts.items()))}:
+        raise KovaEvidenceImportError("summary-mismatch")
+
+    missing: list[str] = []
+    errors: list[str] = []
+    results: list[dict[str, Any]] = []
+    for requirement in policy["scenarios"]:
+        scenario_id = requirement["id"]
+        matching = [item for item in normalized_records if item["scenario"] == scenario_id]
+        if not matching:
+            results.append(
+                {
+                    "id": scenario_id,
+                    "status": "MISSING",
+                    "evidence_ledger_status": None,
+                    "evidence_ledger_digest": None,
+                }
+            )
+            missing.append(f"scenario:{scenario_id}")
+            errors.append("required-scenario-missing")
+            continue
+        statuses = {item["status"] for item in matching}
+        ledgers = {item["ledger_status"] for item in matching}
+        aggregate_status = next(iter(statuses)) if len(statuses) == 1 else "MIXED"
+        aggregate_ledger = next(iter(ledgers)) if len(ledgers) == 1 else "incomplete"
+        ledger_digest = canonical_digest(
+            sorted(
+                (
+                    {
+                        "status": item["status"],
+                        "ledger_status": item["ledger_status"],
+                        "ledger_digest": item["ledger_digest"],
+                    }
+                    for item in matching
+                ),
+                key=lambda item: canonical_json_bytes(item),
+            )
+        )
+        results.append(
+            {
+                "id": scenario_id,
+                "status": aggregate_status,
+                "evidence_ledger_status": aggregate_ledger,
+                "evidence_ledger_digest": ledger_digest,
+            }
+        )
+        if statuses != {"PASS"}:
+            missing.append(f"scenario:{scenario_id}")
+            errors.append("required-scenario-not-pass")
+        if ledgers != {"complete"}:
+            missing.append(f"ledger:{scenario_id}")
+            errors.append("evidence-ledger-incomplete")
+        required_evidence = {
+            (item["id"], item["category"])
+            for item in requirement["required_evidence"]
+        }
+        if any(not required_evidence.issubset(item["passed_evidence"]) for item in matching):
+            missing.append(f"ledger-proof:{scenario_id}")
+            errors.append("required-ledger-proof-missing")
+    if any(status != "PASS" for status in status_counts):
+        errors.append("report-contains-non-pass")
+        missing.append("report-all-records-pass")
+    return results, sorted(set(missing)), sorted(set(errors))
+
+
+def kova_source_defaults(receipt_sha256: str | None = None) -> dict[str, Any]:
+    return {
+        "receipt_schema": "unknown",
+        "receipt_sha256": receipt_sha256,
+        "report_schema": None,
+        "report_sha256": None,
+        "bundle_sha256": None,
+        "artifact_index_sha256": None,
+        "run_id": None,
+        "mode": None,
+    }
+
+
+def build_kova_evidence_document(
+    *,
+    status_value: str,
+    policy_id: str,
+    candidate_binding: dict[str, Any],
+    source: dict[str, Any],
+    scenarios: list[dict[str, Any]],
+    eligible_gates: list[dict[str, str]],
+    missing_requirements: list[str],
+    error_codes: list[str],
+) -> dict[str, Any]:
+    content = {
+        "policy_id": policy_id,
+        "candidate_binding": candidate_binding,
+        "source": source,
+        "scenarios": scenarios,
+        "eligible_gates": eligible_gates,
+        "missing_requirements": sorted(set(missing_requirements)),
+        "error_codes": sorted(set(error_codes)),
+        "canonical_status_effect": "evidence_for_named_gate_only",
+        "post_activation_e2e": "not_run",
+    }
+    generated_at = now_iso()
+    return {
+        "schema": KOVA_EVIDENCE_SCHEMA,
+        "generated_at": generated_at,
+        "effect": "read_only_kova_evidence_import",
+        "runtime_effect": "none",
+        "external_effect": "none",
+        "external_write_effect": "none",
+        "production_apply_allowed": False,
+        "operator_approval": False,
+        "status": status_value,
+        "evidence_content": content,
+        "evidence_digest": canonical_digest(content),
+        "run_envelope": {"generated_at": generated_at},
+    }
+
+
+def kova_evidence(args: argparse.Namespace) -> int:
+    receipt_path = Path(os.path.abspath(args.receipt))
+    candidate_path = Path(os.path.abspath(args.candidate_lock))
+    policy_path = Path(os.path.abspath(args.policy))
+    output_path = Path(os.path.abspath(args.output))
+    policy_id = "invalid-policy"
+    source = kova_source_defaults()
+    candidate_binding = {
+        "status": "missing",
+        "target_candidate_root": None,
+        "identity_kind": None,
+        "identity_digest": None,
+    }
+    scenarios: list[dict[str, Any]] = []
+    missing: list[str] = []
+    errors: list[str] = []
+    eligible_gates: list[dict[str, str]] = []
+    status_value = "rejected"
+    try:
+        policy_raw, _ = parse_bounded_json(policy_path, "policy-invalid")
+        policy = validate_kova_policy(policy_raw)
+        policy_id = policy["policy_id"]
+        candidate_raw, _ = parse_bounded_json(candidate_path, "candidate-lock-invalid")
+        target_root, artifact = validate_kova_candidate_lock(
+            candidate_raw,
+            policy["target_binding"],
+        )
+        candidate_binding["target_candidate_root"] = target_root
+
+        receipt_raw, receipt_payload = parse_bounded_json(receipt_path, "receipt-invalid")
+        source["receipt_sha256"] = kova_sha256_bytes(receipt_payload)
+        if not isinstance(receipt_raw, dict):
+            raise KovaEvidenceImportError("receipt-invalid")
+        receipt_schema = receipt_raw.get("schemaVersion")
+        if receipt_schema not in policy["supported_receipt_schemas"]:
+            raise KovaEvidenceImportError("receipt-schema-unsupported")
+        source["receipt_schema"] = receipt_schema
+        mode = receipt_raw.get("mode")
+        run_id = kova_safe_identifier(receipt_raw.get("runId"))
+        if mode != policy["required_mode"] or run_id is None:
+            raise KovaEvidenceImportError("receipt-contract-invalid")
+        source["mode"] = mode
+        source["run_id"] = run_id
+
+        report_path = resolve_kova_artifact_path(receipt_path, receipt_raw.get("jsonPath"))
+        bundle_path = resolve_kova_artifact_path(receipt_path, receipt_raw.get("bundlePath"))
+        checksum_path = resolve_kova_artifact_path(receipt_path, receipt_raw.get("checksumPath"))
+        if output_path in {
+            receipt_path,
+            candidate_path,
+            policy_path,
+            report_path,
+            bundle_path,
+            checksum_path,
+        }:
+            raise KovaEvidenceImportError("output-collides-with-input")
+        report_raw, report_payload = parse_bounded_json(report_path, "report-invalid")
+        source["report_sha256"] = kova_sha256_bytes(report_payload)
+        if not isinstance(report_raw, dict):
+            raise KovaEvidenceImportError("report-invalid")
+        report_schema = report_raw.get("schemaVersion")
+        if report_schema not in policy["supported_report_schemas"]:
+            raise KovaEvidenceImportError("report-schema-unsupported")
+        source["report_schema"] = report_schema
+        if report_raw.get("mode") != mode or report_raw.get("runId") != run_id:
+            raise KovaEvidenceImportError("receipt-report-mismatch")
+        report_summary = normalize_kova_summary(report_raw.get("summary"))
+        receipt_summary = normalize_kova_summary(receipt_raw.get("summary"))
+        if report_summary != receipt_summary:
+            raise KovaEvidenceImportError("receipt-report-mismatch")
+        receipt_gate = receipt_raw.get("gate")
+        report_gate = report_raw.get("gate")
+        if receipt_gate is not None or report_gate is not None:
+            if (
+                not isinstance(receipt_gate, dict)
+                or not isinstance(report_gate, dict)
+                or receipt_gate.get("verdict") != "SHIP"
+                or report_gate.get("verdict") != "SHIP"
+            ):
+                raise KovaEvidenceImportError("kova-gate-not-ship")
+
+        source["bundle_sha256"] = validate_kova_checksum(bundle_path, checksum_path)
+        source["artifact_index_sha256"], _ = validate_kova_bundle(
+            bundle_path,
+            report_path,
+            report_payload,
+            policy["reject_publication_omissions"],
+        )
+        identity, identity_missing, identity_errors = validate_kova_target_identity(
+            receipt_raw,
+            report_raw,
+            artifact,
+            policy["target_binding"]["accepted_identity_kinds"],
+        )
+        candidate_binding.update(identity)
+        missing.extend(identity_missing)
+        errors.extend(identity_errors)
+        environment_missing, environment_errors = validate_kova_environment(
+            report_raw,
+            candidate_raw,
+        )
+        missing.extend(environment_missing)
+        errors.extend(environment_errors)
+        scenarios, scenario_missing, scenario_errors = aggregate_kova_scenarios(
+            report_raw,
+            policy,
+        )
+        missing.extend(scenario_missing)
+        errors.extend(scenario_errors)
+        if (
+            candidate_binding["status"] == "mismatch"
+            or "target-environment-mismatch" in errors
+        ):
+            status_value = "rejected"
+        elif missing or errors:
+            status_value = "incomplete"
+        else:
+            status_value = "accepted"
+            gate_to_scenarios: dict[str, list[dict[str, Any]]] = {}
+            scenario_by_id = {item["id"]: item for item in scenarios}
+            for requirement in policy["scenarios"]:
+                for gate_id in requirement["gate_ids"]:
+                    gate_to_scenarios.setdefault(gate_id, []).append(
+                        scenario_by_id[requirement["id"]]
+                    )
+            for gate_id in sorted(gate_to_scenarios):
+                gate_content = {
+                    "schema": "openclaw.safe_update.kova_gate_evidence.v1",
+                    "policy_id": policy_id,
+                    "gate_id": gate_id,
+                    "target_candidate_root": target_root,
+                    "target_identity_digest": candidate_binding["identity_digest"],
+                    "receipt_sha256": source["receipt_sha256"],
+                    "report_sha256": source["report_sha256"],
+                    "bundle_sha256": source["bundle_sha256"],
+                    "artifact_index_sha256": source["artifact_index_sha256"],
+                    "scenarios": sorted(
+                        gate_to_scenarios[gate_id], key=lambda item: item["id"]
+                    ),
+                }
+                eligible_gates.append(
+                    {"id": gate_id, "evidence_digest": canonical_digest(gate_content)}
+                )
+    except KovaEvidenceImportError as exc:
+        status_value = "rejected"
+        errors.append(exc.code)
+    except (OSError, ValueError, TypeError, tarfile.TarError):
+        status_value = "rejected"
+        errors.append("import-failed")
+
+    document = build_kova_evidence_document(
+        status_value=status_value,
+        policy_id=policy_id,
+        candidate_binding=candidate_binding,
+        source=source,
+        scenarios=scenarios,
+        eligible_gates=eligible_gates if status_value == "accepted" else [],
+        missing_requirements=missing,
+        error_codes=errors,
+    )
+    write_json(output_path, document)
+    print(output_path)
+    return 0 if status_value == "accepted" else 2
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     subcommands = root.add_subparsers(dest="command", required=True)
@@ -4318,6 +5315,16 @@ def parser() -> argparse.ArgumentParser:
     contract_parser.add_argument("--coverage", type=Path, required=True)
     contract_parser.add_argument("--output", type=Path, required=True)
     contract_parser.set_defaults(handler=contract)
+
+    kova_parser = subcommands.add_parser(
+        "kova-evidence",
+        help="validate and import an existing Kova evidence bundle",
+    )
+    kova_parser.add_argument("--receipt", type=Path, required=True)
+    kova_parser.add_argument("--candidate-lock", type=Path, required=True)
+    kova_parser.add_argument("--policy", type=Path, required=True)
+    kova_parser.add_argument("--output", type=Path, required=True)
+    kova_parser.set_defaults(handler=kova_evidence)
     return root
 
 

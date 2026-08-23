@@ -161,6 +161,28 @@ The first simulation deliberately blocks while still writing the candidate lock.
 
 For a genuinely vanilla deployment, `--allow-no-customizations --allow-no-coverage --runtime-node-version <exact-version> --runtime-os <os> --runtime-arch <arch> --runtime-libc <libc>` may be used only after explicitly confirming that there are no local overlays, patches, wrappers, plugin contracts, or runtime-specific integrations. Do not silently add either flag to automation.
 
+### Import Existing Kova Evidence
+
+Use the importer only to validate existing Kova artifacts against an explicit
+policy. It never runs or installs Kova:
+
+```bash
+python3 scripts/openclaw_safe_update.py kova-evidence \
+  --receipt <kova-receipt.json> \
+  --candidate-lock <installation-candidate-lock.json> \
+  --policy <kova-evidence-policy.json> \
+  --output <kova-evidence.json>
+```
+
+Start from `examples/kova-evidence-policy.example.json`. A `PASS` adds evidence
+only to the policy's named gates; it cannot mutate a rehearsal status or
+verdict. A current Kova result without an exact candidate identity is
+`incomplete` and exits `2`. The imported output contains only identifiers,
+statuses, and hashes, never logs, paths, configuration, messages, or secrets.
+An exact artifact match alone cannot satisfy `environment-matched-rehearsal`:
+the Kova report platform and toolchain must match the candidate lock. Missing
+environment fields are `incomplete`; known mismatches are `rejected`.
+
 ### 6. Review and Stop
 
 Inspect these artifacts:

@@ -2916,6 +2916,93 @@ class SafeUpdateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("exact semver", result.stderr)
 
+    def test_registry_metadata_accepts_exact_match_from_npm_list(self) -> None:
+        exact = {
+            "name": "openclaw",
+            "version": "2026.7.1-2",
+            "dist": {"integrity": "sha512-exact", "shasum": "exact-shasum"},
+        }
+        with patch.object(
+            SAFE_UPDATE,
+            "run_npm_json",
+            return_value=[
+                {"name": "openclaw", "version": "2026.7.1-1", "dist": {}},
+                exact,
+            ],
+        ):
+            metadata = SAFE_UPDATE.registry_metadata(
+                "openclaw", "2026.7.1-2", self.root / "npm-cache"
+            )
+
+        self.assertEqual(
+            metadata,
+            {
+                "name": "openclaw",
+                "version": "2026.7.1-2",
+                "integrity": "sha512-exact",
+                "shasum": "exact-shasum",
+            },
+        )
+
+    def test_registry_metadata_rejects_ambiguous_npm_list(self) -> None:
+        exact = {
+            "name": "openclaw",
+            "version": "2026.7.1-2",
+            "dist": {"integrity": "sha512-exact", "shasum": "exact-shasum"},
+        }
+        with patch.object(
+            SAFE_UPDATE,
+            "run_npm_json",
+            return_value=[exact, copy.deepcopy(exact)],
+        ):
+            with self.assertRaisesRegex(
+                SAFE_UPDATE.RehearsalError, "registry metadata mismatch"
+            ):
+                SAFE_UPDATE.registry_metadata(
+                    "openclaw", "2026.7.1-2", self.root / "npm-cache"
+                )
+
+    def test_pack_archive_accepts_npm_package_map(self) -> None:
+        destination = self.root / "npm-pack"
+        destination.mkdir()
+        (destination / "openclaw-2026.7.1-2.tgz").write_bytes(b"archive")
+        with patch.object(
+            SAFE_UPDATE,
+            "run_npm_json",
+            return_value={
+                "openclaw": {
+                    "name": "openclaw",
+                    "version": "2026.7.1-2",
+                    "filename": "openclaw-2026.7.1-2.tgz",
+                }
+            },
+        ):
+            filename = SAFE_UPDATE.pack_archive(
+                "openclaw", "2026.7.1-2", destination, self.root / "npm-cache"
+            )
+
+        self.assertEqual(filename, "openclaw-2026.7.1-2.tgz")
+
+    def test_pack_archive_rejects_ambiguous_npm_package_map(self) -> None:
+        destination = self.root / "npm-pack"
+        destination.mkdir()
+        entry = {
+            "name": "openclaw",
+            "version": "2026.7.1-2",
+            "filename": "openclaw-2026.7.1-2.tgz",
+        }
+        with patch.object(
+            SAFE_UPDATE,
+            "run_npm_json",
+            return_value={"first": entry, "second": copy.deepcopy(entry)},
+        ):
+            with self.assertRaisesRegex(
+                SAFE_UPDATE.RehearsalError, "unexpected npm pack result"
+            ):
+                SAFE_UPDATE.pack_archive(
+                    "openclaw", "2026.7.1-2", destination, self.root / "npm-cache"
+                )
+
     def test_workflow_has_no_apply_or_external_write_surface(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         forbidden = [

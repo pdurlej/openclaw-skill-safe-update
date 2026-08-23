@@ -172,6 +172,30 @@ content hashing is restricted to declared package, add-on, sidecar, and
 external-asset files. See
 [`examples/local-installation.observation.json`](examples/local-installation.observation.json).
 
+## Import Existing Kova Evidence
+
+Import a completed Kova execution receipt as public-safe, named-gate evidence:
+
+```bash
+python3 scripts/openclaw_safe_update.py kova-evidence \
+  --receipt <kova-receipt.json> \
+  --candidate-lock <installation-candidate-lock.json> \
+  --policy <kova-evidence-policy.json> \
+  --output <kova-evidence.json>
+```
+
+Start with
+[`examples/kova-evidence-policy.example.json`](examples/kova-evidence-policy.example.json).
+The importer only validates existing Kova artifacts. It never runs or installs
+Kova. A `PASS` adds evidence only for the policy's named gates; it cannot
+mutate a rehearsal status or verdict. A current Kova result without an exact
+candidate identity is correctly emitted as `incomplete` with exit code `2`.
+An exact artifact match alone cannot satisfy `environment-matched-rehearsal`:
+the Kova report platform and toolchain must match the candidate lock. Missing
+environment fields are `incomplete`; known mismatches are `rejected`.
+The output contains only identifiers, statuses, and hashes, never logs, paths,
+configuration, messages, or secrets.
+
 Replace both example manifests with checks for your actual system. A genuinely
 vanilla deployment can use `--allow-no-customizations --allow-no-coverage
 --runtime-node-version <exact-version> --runtime-os <os> --runtime-arch <arch>
@@ -191,6 +215,7 @@ protection this project exists to provide.
 | `impact-shadow.json` | Non-authoritative mapping from closed-candidate changes to components, capabilities, contracts, hypothetical checks, and unmapped paths |
 | `analysis-cache.json` | Non-authoritative full input digest plus per-namespace hit, miss, and ignored-entry provenance |
 | `archive-execution.json` | Non-authoritative worker count, per-archive status, timeout, and wall-clock telemetry |
+| `kova-evidence.json` | Optional, additive verification of an existing exact-candidate Kova execution; never changes the canonical verdict |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
 | `coverage-report.json` | Whether every required installation surface is represented and bound to evidence |
