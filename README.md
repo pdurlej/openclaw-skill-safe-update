@@ -190,6 +190,9 @@ The importer only validates existing Kova artifacts. It never runs or installs
 Kova. A `PASS` adds evidence only for the policy's named gates; it cannot
 mutate a rehearsal status or verdict. A current Kova result without an exact
 candidate identity is correctly emitted as `incomplete` with exit code `2`.
+An exact artifact match alone cannot satisfy `environment-matched-rehearsal`:
+the Kova report platform and toolchain must match the candidate lock. Missing
+environment fields are `incomplete`; known mismatches are `rejected`.
 The output contains only identifiers, statuses, and hashes, never logs, paths,
 configuration, messages, or secrets.
 

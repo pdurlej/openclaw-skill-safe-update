@@ -179,6 +179,9 @@ only to the policy's named gates; it cannot mutate a rehearsal status or
 verdict. A current Kova result without an exact candidate identity is
 `incomplete` and exits `2`. The imported output contains only identifiers,
 statuses, and hashes, never logs, paths, configuration, messages, or secrets.
+An exact artifact match alone cannot satisfy `environment-matched-rehearsal`:
+the Kova report platform and toolchain must match the candidate lock. Missing
+environment fields are `incomplete`; known mismatches are `rejected`.
 
 ### 6. Review and Stop
 
