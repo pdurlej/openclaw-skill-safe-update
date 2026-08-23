@@ -1,0 +1,25 @@
+{
+  "schema": "openclaw.safe_update.kova_evidence_policy.v1",
+  "policy_id": "kova-openclaw-core-execution-v1",
+  "supported_receipt_schemas": [
+    "kova.run.receipt.v1",
+    "kova.matrix.run.receipt.v1"
+  ],
+  "supported_report_schemas": ["kova.report.v1"],
+  "required_mode": "execution",
+  "target_binding": {
+    "component_id": "core.openclaw",
+    "artifact_kind": "npm_package",
+    "artifact_ref": "openclaw",
+    "accepted_identity_kinds": ["npm_integrity"]
+  },
+  "reject_publication_omissions": true,
+  "scenarios": [
+    {"id": "upgrade-existing-user", "gate_ids": ["state-migration-rehearsal", "environment-matched-rehearsal"]},
+    {"id": "release-runtime-startup", "gate_ids": ["launcher-service-contract", "environment-matched-rehearsal"]},
+    {"id": "official-plugin-install", "gate_ids": ["plugin-sdk-contract"]},
+    {"id": "plugin-lifecycle", "gate_ids": ["plugin-sdk-contract"]},
+    {"id": "mcp-runtime-start-stop", "gate_ids": ["protocol-contract"]},
+    {"id": "mcp-tool-call", "gate_ids": ["protocol-contract"]}
+  ]
+}
