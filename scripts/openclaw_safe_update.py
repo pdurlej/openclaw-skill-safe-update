@@ -1135,6 +1135,17 @@ def resolve_core_closure(
 
 def registry_metadata(package: str, version: str, cache_dir: Path) -> dict[str, Any]:
     value = run_npm_json(["view", f"{package}@{version}", "--json"], cache_dir)
+    if isinstance(value, list):
+        matches = [
+            item
+            for item in value
+            if isinstance(item, dict)
+            and item.get("name") == package
+            and item.get("version") == version
+        ]
+        if len(matches) != 1:
+            raise RehearsalError(f"registry metadata mismatch for {package}@{version}")
+        value = matches[0]
     if not isinstance(value, dict) or value.get("name") != package or value.get("version") != version:
         raise RehearsalError(f"registry metadata mismatch for {package}@{version}")
     dist = value.get("dist")
@@ -1154,6 +1165,14 @@ def pack_archive(package: str, version: str, destination: Path, cache_dir: Path)
         ["pack", f"{package}@{version}", "--json", "--pack-destination", str(destination)],
         cache_dir,
     )
+    if isinstance(value, dict):
+        value = [
+            item
+            for item in value.values()
+            if isinstance(item, dict)
+            and item.get("name") == package
+            and item.get("version") == version
+        ]
     if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
         raise RehearsalError(f"unexpected npm pack result for {package}@{version}")
     filename = value[0].get("filename")
