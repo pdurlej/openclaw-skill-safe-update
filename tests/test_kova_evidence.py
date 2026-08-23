@@ -37,6 +37,10 @@ REQUIRED_SCENARIOS = (
     "mcp-tool-call",
 )
 NPM_INTEGRITY = "sha512-" + __import__("base64").b64encode(b"b" * 64).decode("ascii")
+REQUIRED_EVIDENCE = {
+    item["id"]: item["required_evidence"]
+    for item in json.loads(POLICY_EXAMPLE.read_text(encoding="utf-8"))["scenarios"]
+}
 
 
 def sha256(payload: bytes) -> str:
@@ -137,6 +141,18 @@ class KovaEvidenceTest(unittest.TestCase):
 
     def _record(self, scenario: str, status: str = "PASS") -> dict[str, object]:
         ledger_status = "passed" if status == "PASS" else "failed"
+        entries = [
+            {
+                "id": item["id"],
+                "category": item["category"],
+                "required": True,
+                "status": ledger_status,
+            }
+            for item in REQUIRED_EVIDENCE[scenario]
+        ]
+        by_category: dict[str, int] = {}
+        for item in entries:
+            by_category[item["category"]] = by_category.get(item["category"], 0) + 1
         return {
             "scenario": scenario,
             "status": status,
@@ -145,21 +161,14 @@ class KovaEvidenceTest(unittest.TestCase):
                 "schemaVersion": "kova.evidenceLedger.v1",
                 "completeness": "complete" if status == "PASS" else "failed",
                 "summary": {
-                    "total": 1,
-                    "required": 1,
+                    "total": len(entries),
+                    "required": len(entries),
                     "requiredMissing": 0,
-                    "requiredFailed": 0 if status == "PASS" else 1,
-                    "byStatus": {ledger_status: 1},
-                    "byCategory": {"command": 1},
+                    "requiredFailed": 0 if status == "PASS" else len(entries),
+                    "byStatus": {ledger_status: len(entries)},
+                    "byCategory": by_category,
                 },
-                "entries": [
-                    {
-                        "id": f"{scenario}-proof",
-                        "category": "command",
-                        "required": True,
-                        "status": ledger_status,
-                    }
-                ],
+                "entries": entries,
             },
         }
 
@@ -176,6 +185,7 @@ class KovaEvidenceTest(unittest.TestCase):
         empty_ledgers: bool = False,
         malformed_ledger: bool = False,
         contradictory_ledger_summary: bool = False,
+        arbitrary_evidence: bool = False,
     ) -> Path:
         records = [
             self._record(scenario, (statuses or {}).get(scenario, "PASS"))
@@ -199,6 +209,23 @@ class KovaEvidenceTest(unittest.TestCase):
             for record in records:
                 record["evidenceLedger"]["summary"]["requiredMissing"] = 1
                 record["evidenceLedger"]["summary"]["requiredFailed"] = 1
+        if arbitrary_evidence:
+            for record in records:
+                record["evidenceLedger"] = {
+                    "schemaVersion": "kova.evidenceLedger.v1",
+                    "completeness": "complete",
+                    "summary": {
+                        "total": 1,
+                        "required": 1,
+                        "requiredMissing": 0,
+                        "requiredFailed": 0,
+                        "byStatus": {"passed": 1},
+                        "byCategory": {"x": 1},
+                    },
+                    "entries": [
+                        {"id": "x", "category": "x", "required": True, "status": "passed"}
+                    ],
+                }
         counts: dict[str, int] = {}
         for record in records:
             status = str(record["status"])
@@ -481,6 +508,16 @@ class KovaEvidenceTest(unittest.TestCase):
         document = self.read_output()
         self.assertEqual(document["status"], "incomplete")
         self.assertEqual(document["evidence_content"]["eligible_gates"], [])
+
+    def test_arbitrary_typed_ledger_tokens_cannot_satisfy_policy(self) -> None:
+        self.receipt = self._write_kova_run(arbitrary_evidence=True)
+
+        result = self.run_import()
+
+        self.assertEqual(result.returncode, 2)
+        document = self.read_output()
+        self.assertEqual(document["status"], "incomplete")
+        self.assertIn("required-ledger-proof-missing", document["evidence_content"]["error_codes"])
 
     def test_bundle_member_tamper_is_rejected_even_with_fresh_outer_checksum(self) -> None:
         self.receipt = self._write_kova_run(corrupt_indexed_member=True)

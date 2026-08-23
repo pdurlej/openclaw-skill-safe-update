@@ -43,7 +43,7 @@
       "uniqueItems": true,
       "items": {
         "type": "object",
-        "required": ["id", "gate_ids"],
+        "required": ["id", "gate_ids", "required_evidence"],
         "properties": {
           "id": {"type": "string", "minLength": 1},
           "gate_ids": {
@@ -51,6 +51,20 @@
             "minItems": 1,
             "uniqueItems": true,
             "items": {"enum": ["lifecycle-download-evidence", "state-migration-rehearsal", "rollback-evidence", "plugin-sdk-contract", "launcher-service-contract", "permissions-contract", "protocol-contract", "channel-crypto-contract", "environment-matched-rehearsal"]}
+          },
+          "required_evidence": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "required": ["id", "category"],
+              "properties": {
+                "id": {"type": "string", "minLength": 1},
+                "category": {"enum": ["command", "invariant", "collector"]}
+              },
+              "additionalProperties": false
+            }
           }
         },
         "additionalProperties": false

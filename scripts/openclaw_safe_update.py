@@ -4374,10 +4374,11 @@ def validate_kova_policy(value: Any) -> dict[str, Any]:
     normalized_scenarios: list[dict[str, Any]] = []
     scenario_ids: set[str] = set()
     for item in scenarios:
-        if not isinstance(item, dict) or set(item) != {"id", "gate_ids"}:
+        if not isinstance(item, dict) or set(item) != {"id", "gate_ids", "required_evidence"}:
             raise KovaEvidenceImportError("policy-invalid")
         scenario_id = kova_safe_identifier(item.get("id"))
         gate_ids = item.get("gate_ids")
+        required_evidence = item.get("required_evidence")
         if (
             scenario_id is None
             or scenario_id in scenario_ids
@@ -4385,11 +4386,35 @@ def validate_kova_policy(value: Any) -> dict[str, Any]:
             or not gate_ids
             or len(gate_ids) != len(set(gate_ids))
             or any(gate_id not in GATE_EVIDENCE_IDS for gate_id in gate_ids)
+            or not isinstance(required_evidence, list)
+            or not required_evidence
         ):
             raise KovaEvidenceImportError("policy-invalid")
+        normalized_evidence: list[dict[str, str]] = []
+        evidence_keys: set[tuple[str, str]] = set()
+        for evidence in required_evidence:
+            if not isinstance(evidence, dict) or set(evidence) != {"id", "category"}:
+                raise KovaEvidenceImportError("policy-invalid")
+            evidence_id = kova_safe_identifier(evidence.get("id"))
+            category = evidence.get("category")
+            key = (str(evidence_id), str(category))
+            if (
+                evidence_id is None
+                or category not in {"command", "invariant", "collector"}
+                or key in evidence_keys
+            ):
+                raise KovaEvidenceImportError("policy-invalid")
+            evidence_keys.add(key)
+            normalized_evidence.append({"id": evidence_id, "category": category})
         scenario_ids.add(scenario_id)
         normalized_scenarios.append(
-            {"id": scenario_id, "gate_ids": sorted(gate_ids)}
+            {
+                "id": scenario_id,
+                "gate_ids": sorted(gate_ids),
+                "required_evidence": sorted(
+                    normalized_evidence, key=lambda evidence: (evidence["id"], evidence["category"])
+                ),
+            }
         )
     normalized_scenarios.sort(key=lambda item: item["id"])
     return {
@@ -4803,6 +4828,7 @@ def aggregate_kova_scenarios(
         ledger = record.get("evidenceLedger")
         ledger_status = "missing"
         ledger_digest = None
+        passed_evidence: set[tuple[str, str]] = set()
         if isinstance(ledger, dict):
             ledger_digest = canonical_digest(ledger)
             entries = ledger.get("entries")
@@ -4847,6 +4873,11 @@ def aggregate_kova_scenarios(
                 and ledger.get("summary") == expected_summary
             ):
                 ledger_status = "complete"
+                passed_evidence = {
+                    (item["id"], item["category"])
+                    for item in required_entries
+                    if item["status"] == "passed"
+                }
             else:
                 ledger_status = "incomplete"
         normalized_records.append(
@@ -4855,6 +4886,7 @@ def aggregate_kova_scenarios(
                 "status": status_value,
                 "ledger_status": ledger_status,
                 "ledger_digest": ledger_digest,
+                "passed_evidence": passed_evidence,
             }
         )
     summary = normalize_kova_summary(report.get("summary"))
@@ -4910,6 +4942,13 @@ def aggregate_kova_scenarios(
         if ledgers != {"complete"}:
             missing.append(f"ledger:{scenario_id}")
             errors.append("evidence-ledger-incomplete")
+        required_evidence = {
+            (item["id"], item["category"])
+            for item in requirement["required_evidence"]
+        }
+        if any(not required_evidence.issubset(item["passed_evidence"]) for item in matching):
+            missing.append(f"ledger-proof:{scenario_id}")
+            errors.append("required-ledger-proof-missing")
     if any(status != "PASS" for status in status_counts):
         errors.append("report-contains-non-pass")
         missing.append("report-all-records-pass")
