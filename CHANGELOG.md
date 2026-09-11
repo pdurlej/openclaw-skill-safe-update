@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.2 - 2026-09-11
 
 - Consume current Kova report/ledger/bundle output without confusing harness
   Node metadata with the target OpenClaw toolchain. Keep explicit environment
@@ -12,6 +12,8 @@
 - Document full-copy rehearsal, actual CLI migration paths, measured rollback,
   and post-start admission using existing Kova and OpenClaw phase contracts.
 - Add an opt-in compatibility test using the real upstream Kova producers.
+- Publish an anonymized field report covering the failed 9.1 attempt, successful
+  9.2 cutover, and 9.3 forward recovery, with aggregate evidence and limitations.
 
 ## 1.3.1 - 2026-07-26
 

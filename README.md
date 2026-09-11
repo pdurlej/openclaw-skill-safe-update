@@ -213,6 +213,11 @@ KOVA_CHECKOUT=/path/to/Kova python3 -m unittest tests.test_kova_upstream -v
 This contract test uses upstream report, ledger, and bundle producers with
 synthetic records. It neither provisions OpenClaw nor proves live migration.
 
+See the [anonymized 9.1-9.3 field report](references/field-report-2026-09.md)
+for the production experience behind this method, including the failed first
+attempt and the successful recovery. It distinguishes historical operational
+results from tests of the new importer.
+
 Replace both example manifests with checks for your actual system. A genuinely
 vanilla deployment can use `--allow-no-customizations --allow-no-coverage
 --runtime-node-version <exact-version> --runtime-os <os> --runtime-arch <arch>
