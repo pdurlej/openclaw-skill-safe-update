@@ -25,6 +25,7 @@
           "type": "object",
           "required": ["status", "target_candidate_root", "identity_kind", "identity_digest"],
           "properties": {
+            "scope": {"const": "core_npm_artifact_only"},
             "status": {"enum": ["exact", "version_only", "missing", "mismatch"]},
             "target_candidate_root": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
             "identity_kind": {"type": ["string", "null"], "enum": ["npm_integrity", "git_sha", "build_digest", null]},

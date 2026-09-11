@@ -4753,6 +4753,21 @@ def validate_kova_target_identity(
         }, ["target-identity"], ["target-identity-incomplete"]
     if receipt_identity != report_identity:
         raise KovaEvidenceImportError("target-identity-disagreement")
+    records = report.get("records")
+    if not isinstance(records, list) or not records:
+        raise KovaEvidenceImportError("records-invalid")
+    for record in records:
+        if not isinstance(record, dict):
+            raise KovaEvidenceImportError("records-invalid")
+        if record.get("status") not in {"DRY-RUN", "SKIPPED"}:
+            if record.get("targetIdentity") is None:
+                return {
+                    "status": "missing",
+                    "identity_kind": None,
+                    "identity_digest": None,
+                }, ["record-target-identity"], ["record-target-identity-missing"]
+            if record["targetIdentity"] != report_identity:
+                raise KovaEvidenceImportError("record-target-identity-disagreement")
     identity = receipt_identity
     if not isinstance(identity, dict) or set(identity) != {
         "schemaVersion",
@@ -4841,28 +4856,9 @@ def validate_kova_environment(
         "libc",
     }:
         raise KovaEvidenceImportError("candidate-lock-invalid")
-    platform_value = report.get("platform")
-    if not isinstance(platform_value, dict):
-        return ["target-environment"], ["target-environment-incomplete"]
-    observed = {
-        "node_version": platform_value.get("node"),
-        "npm_version": platform_value.get("npm"),
-        "os": platform_value.get("os"),
-        "arch": platform_value.get("arch"),
-        "libc": platform_value.get("libc"),
-    }
-    if isinstance(observed["node_version"], str):
-        observed["node_version"] = observed["node_version"].removeprefix("v")
-    if any(
-        isinstance(observed[key], str)
-        and bool(observed[key])
-        and observed[key] != expected[key]
-        for key in observed
-    ):
-        return [], ["target-environment-mismatch"]
-    if any(not isinstance(value, str) or not value for value in observed.values()):
-        return ["target-environment"], ["target-environment-incomplete"]
-    return [], []
+    # Kova platformInfo() describes the harness process, not the OCM runtime.
+    # kova.report.v1 has no target toolchain contract; never infer one from it.
+    return ["target-environment"], ["target-environment-incomplete"]
 
 
 def aggregate_kova_scenarios(
@@ -5073,6 +5069,7 @@ def kova_evidence(args: argparse.Namespace) -> int:
     source = kova_source_defaults()
     candidate_binding = {
         "status": "missing",
+        "scope": "core_npm_artifact_only",
         "target_candidate_root": None,
         "identity_kind": None,
         "identity_digest": None,
@@ -5161,12 +5158,15 @@ def kova_evidence(args: argparse.Namespace) -> int:
         candidate_binding.update(identity)
         missing.extend(identity_missing)
         errors.extend(identity_errors)
-        environment_missing, environment_errors = validate_kova_environment(
-            report_raw,
-            candidate_raw,
-        )
-        missing.extend(environment_missing)
-        errors.extend(environment_errors)
+        if any(
+            "environment-matched-rehearsal" in requirement["gate_ids"]
+            for requirement in policy["scenarios"]
+        ):
+            environment_missing, environment_errors = validate_kova_environment(
+                report_raw, candidate_raw,
+            )
+            missing.extend(environment_missing)
+            errors.extend(environment_errors)
         scenarios, scenario_missing, scenario_errors = aggregate_kova_scenarios(
             report_raw,
             policy,

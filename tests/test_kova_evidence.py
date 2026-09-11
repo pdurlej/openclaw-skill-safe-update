@@ -233,6 +233,9 @@ class KovaEvidenceTest(unittest.TestCase):
             counts[status] = counts.get(status, 0) + 1
         summary = {"total": len(records), "statuses": counts}
         target_identity = self.identity if identity is True else identity
+        if target_identity is not None:
+            for record in records:
+                record["targetIdentity"] = target_identity
         report: dict[str, object] = {
             "schemaVersion": report_schema,
             "generatedAt": "2026-08-23T00:00:00.000Z",
@@ -377,7 +380,6 @@ class KovaEvidenceTest(unittest.TestCase):
         self.assertEqual(
             [item["id"] for item in document["evidence_content"]["eligible_gates"]],
             [
-                "environment-matched-rehearsal",
                 "launcher-service-contract",
                 "plugin-sdk-contract",
                 "protocol-contract",
@@ -414,6 +416,7 @@ class KovaEvidenceTest(unittest.TestCase):
         self.assertEqual(document["evidence_content"]["candidate_binding"]["status"], "version_only")
 
     def test_missing_environment_identity_is_incomplete(self) -> None:
+        self.require_environment_gate()
         self.receipt = self._write_kova_run(platform=None)
 
         result = self.run_import()
@@ -426,7 +429,8 @@ class KovaEvidenceTest(unittest.TestCase):
             document["evidence_content"]["error_codes"],
         )
 
-    def test_environment_mismatch_is_rejected(self) -> None:
+    def test_different_harness_platform_leaves_target_environment_incomplete(self) -> None:
+        self.require_environment_gate()
         self.receipt = self._write_kova_run(
             platform={
                 "os": "darwin",
@@ -441,13 +445,14 @@ class KovaEvidenceTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         document = self.read_output()
-        self.assertEqual(document["status"], "rejected")
+        self.assertEqual(document["status"], "incomplete")
         self.assertIn(
-            "target-environment-mismatch",
+            "target-environment-incomplete",
             document["evidence_content"]["error_codes"],
         )
 
-    def test_known_environment_mismatch_wins_over_missing_fields(self) -> None:
+    def test_partial_harness_platform_is_not_target_environment_proof(self) -> None:
+        self.require_environment_gate()
         self.receipt = self._write_kova_run(
             platform={"os": "darwin", "arch": "arm64", "node": "v22.14.0"}
         )
@@ -456,11 +461,65 @@ class KovaEvidenceTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         document = self.read_output()
-        self.assertEqual(document["status"], "rejected")
+        self.assertEqual(document["status"], "incomplete")
         self.assertIn(
-            "target-environment-mismatch",
+            "target-environment-incomplete",
             document["evidence_content"]["error_codes"],
         )
+
+    def require_environment_gate(self) -> None:
+        policy = json.loads(self.policy.read_text(encoding="utf-8"))
+        policy["scenarios"][0]["gate_ids"].append("environment-matched-rehearsal")
+        self.policy.write_bytes(json_bytes(policy))
+
+    def test_harness_platform_cannot_attest_target_toolchain(self) -> None:
+        self.require_environment_gate()
+        self.assertEqual(self.run_import().returncode, 2)
+        self.assertEqual(self.read_output()["status"], "incomplete")
+
+    def test_upstream_harness_platform_accepts_core_evidence_only(self) -> None:
+        self.receipt = self._write_kova_run(platform={
+            "os": "darwin", "arch": "arm64", "release": "test", "node": "v26.8.1",
+        })
+        self.assertEqual(self.run_import().returncode, 0)
+        document = self.read_output()["evidence_content"]
+        self.assertEqual(document["candidate_binding"]["scope"], "core_npm_artifact_only")
+        self.assertNotIn("environment-matched-rehearsal", [g["id"] for g in document["eligible_gates"]])
+
+    def test_mixed_record_target_identity_is_rejected(self) -> None:
+        report = {"targetIdentity": self.identity, "records": [
+            {"status": "PASS", "targetIdentity": {**self.identity, "resolvedVersion": "2.0.0"}},
+        ]}
+        with self.assertRaises(SAFE_UPDATE.KovaEvidenceImportError):
+            SAFE_UPDATE.validate_kova_target_identity(
+                {"targetIdentity": self.identity}, report, {}, ["npm_integrity"],
+            )
+
+    def test_missing_record_identity_stays_incomplete(self) -> None:
+        binding, missing, errors = SAFE_UPDATE.validate_kova_target_identity(
+            {"targetIdentity": self.identity},
+            {"targetIdentity": self.identity, "records": [{"status": "PASS"}]},
+            {}, ["npm_integrity"],
+        )
+        self.assertEqual(binding["status"], "missing")
+        self.assertIn("record-target-identity", missing)
+
+    def test_snapshot_presence_alone_does_not_prove_preservation(self) -> None:
+        record = self._record("upgrade-existing-user")
+        ledger = record["evidenceLedger"]
+        ledger["entries"] = [e for e in ledger["entries"] if e["id"] in {
+            "invariant:upgrade-state-snapshots-present", "collector:final-metrics",
+        }]
+        ledger["summary"] = {
+            "total": 2, "required": 2, "requiredMissing": 0, "requiredFailed": 0,
+            "byStatus": {"passed": 2}, "byCategory": {"invariant": 1, "collector": 1},
+        }
+        policy = json.loads(self.policy.read_text())
+        _, missing, errors = SAFE_UPDATE.aggregate_kova_scenarios(
+            {"records": [record], "summary": {"total": 1, "statuses": {"PASS": 1}}}, policy,
+        )
+        self.assertIn("ledger-proof:upgrade-existing-user", missing)
+        self.assertIn("required-ledger-proof-missing", errors)
 
     def test_each_negative_or_unknown_status_fails_closed(self) -> None:
         for status in ("FAIL", "BLOCKED", "INCOMPLETE", "SKIPPED", "DRY-RUN", "TIMED_OUT"):

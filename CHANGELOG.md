@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Consume current Kova report/ledger/bundle output without confusing harness
+  Node metadata with the target OpenClaw toolchain. Keep explicit environment
+  claims incomplete until target evidence exists.
+- Label Kova identity as core npm artifact scope and verify every executed
+  record agrees with the report identity.
+- Require upgrade preservation invariants beyond snapshot presence.
+- Resolve bundled skill commands through OpenClaw's `{baseDir}` substitution.
+- Document full-copy rehearsal, actual CLI migration paths, measured rollback,
+  and post-start admission using existing Kova and OpenClaw phase contracts.
+- Add an opt-in compatibility test using the real upstream Kova producers.
+
 ## 1.3.1 - 2026-07-26
 
 - Isolate project, user, and global npm configuration and stop forwarding
