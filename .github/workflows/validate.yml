@@ -27,8 +27,8 @@ jobs:
             --slug safe-upgrade-rehearsal \
             --name "OpenClaw Safe Upgrade Rehearsal Kit" \
             --owner pdurlej \
-            --version 1.3.1 \
-            --changelog "Bounded subprocess environments, resolved tool paths, and explicit OpenClaw runtime prerequisites." \
+            --version 1.3.2 \
+            --changelog "Kova contract compatibility, stateful upgrade guidance, and anonymized field evidence." \
             --topics "dry-run,upgrade-rehearsal,release-engineering,supply-chain-security" \
             --dry-run \
             --json

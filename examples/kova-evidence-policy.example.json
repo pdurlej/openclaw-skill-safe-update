@@ -14,8 +14,19 @@
   },
   "reject_publication_omissions": true,
   "scenarios": [
-    {"id": "upgrade-existing-user", "gate_ids": ["state-migration-rehearsal", "environment-matched-rehearsal"], "required_evidence": [{"id": "invariant:upgrade-state-snapshots-present", "category": "invariant"}, {"id": "collector:final-metrics", "category": "collector"}]},
-    {"id": "release-runtime-startup", "gate_ids": ["launcher-service-contract", "environment-matched-rehearsal"], "required_evidence": [{"id": "invariant:release-runtime-command-receipts", "category": "invariant"}, {"id": "collector:final-metrics", "category": "collector"}]},
+    {"id": "upgrade-existing-user", "gate_ids": ["state-migration-rehearsal"], "required_evidence": [
+      {"id": "invariant:upgrade-state-snapshots-present", "category": "invariant"},
+      {"id": "invariant:plugin-install-index-preserved", "category": "invariant"},
+      {"id": "invariant:plugin-directory-count-not-decreased", "category": "invariant"},
+      {"id": "invariant:provider-ids-preserved", "category": "invariant"},
+      {"id": "invariant:model-ids-preserved", "category": "invariant"},
+      {"id": "invariant:auth-method-shape-preserved", "category": "invariant"},
+      {"id": "invariant:installed-plugin-ids-preserved", "category": "invariant"},
+      {"id": "invariant:workspace-roots-preserved", "category": "invariant"},
+      {"id": "invariant:runtime-target-kind-stable", "category": "invariant"},
+      {"id": "collector:final-metrics", "category": "collector"}
+    ]},
+    {"id": "release-runtime-startup", "gate_ids": ["launcher-service-contract"], "required_evidence": [{"id": "invariant:release-runtime-command-receipts", "category": "invariant"}, {"id": "collector:final-metrics", "category": "collector"}]},
     {"id": "official-plugin-install", "gate_ids": ["plugin-sdk-contract"], "required_evidence": [{"id": "invariant:official-plugin-command-receipts", "category": "invariant"}, {"id": "collector:final-metrics", "category": "collector"}]},
     {"id": "plugin-lifecycle", "gate_ids": ["plugin-sdk-contract"], "required_evidence": [{"id": "command:baseline:1", "category": "command"}, {"id": "command:restart:1", "category": "command"}, {"id": "collector:final-metrics", "category": "collector"}]},
     {"id": "mcp-runtime-start-stop", "gate_ids": ["protocol-contract"], "required_evidence": [{"id": "command:mcp-bridge:1", "category": "command"}, {"id": "command:post-mcp-health:1", "category": "command"}, {"id": "collector:final-metrics", "category": "collector"}]},

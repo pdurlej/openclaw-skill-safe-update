@@ -1,6 +1,6 @@
 ---
 name: openclaw-safe-update
-description: Dry-run an OpenClaw version update without touching a live runtime. Use when comparing current and target OpenClaw packages, checking customized Signal, Matrix, MCP, provider, or runtime integration surfaces, producing synthetic-update evidence, preparing a Patchwarden-compatible review bundle, or writing a rollback-aware operator plan before an update.
+description: Rehearse an OpenClaw update with exact package evidence, installation coverage, and existing Kova reports. Use before an upgrade to identify compatibility gaps and prepare a migration, rollback, and post-start verification plan.
 metadata: {"openclaw":{"homepage":"https://github.com/pdurlej/openclaw-skill-safe-update","requires":{"bins":["python3","node","npm"]}}}
 ---
 
@@ -19,6 +19,12 @@ Prepare evidence for an OpenClaw update while keeping production unchanged. Ever
 
 Read [references/evidence-contract.md](references/evidence-contract.md) before changing the artifact schema or interpreting a verdict.
 
+Resolve bundled helpers from `{baseDir}`, the installed skill directory. Keep
+input and output paths in the operator's working directory. Kova and OCM are
+optional external lab tools; importing their existing evidence needs neither
+binary. For stateful upgrades or Kova integration, read
+[references/kova-upgrade-rehearsal.md](references/kova-upgrade-rehearsal.md).
+
 ## Workflow
 
 ### 1. Inventory the Installation
@@ -26,7 +32,7 @@ Read [references/evidence-contract.md](references/evidence-contract.md) before c
 Create a public-safe draft without reading configuration, credentials, conversations, or service state:
 
 ```bash
-python3 scripts/openclaw_safe_update.py inventory \
+python3 "{baseDir}/scripts/openclaw_safe_update.py" inventory \
   --package-root "$(npm root -g)/openclaw" \
   --output-dir .openclaw-safe-update/inventory
 ```
@@ -108,7 +114,7 @@ Valid categories are `channel`, `plugin`, `mcp`, `memory`, `persona`, `provider`
 ### 4. Fetch Immutable Package Evidence
 
 ```bash
-python3 scripts/openclaw_safe_update.py fetch \
+python3 "{baseDir}/scripts/openclaw_safe_update.py" fetch \
   --current-version 2026.6.11 \
   --target-version 2026.7.1 \
   --packages-json '["openclaw"]' \
@@ -121,7 +127,7 @@ Before simulation, translate the v1.1 manifests into the capability/component
 graph:
 
 ```bash
-python3 scripts/openclaw_safe_update.py contract \
+python3 "{baseDir}/scripts/openclaw_safe_update.py" contract \
   --customizations .openclaw-safe-update/customizations.json \
   --coverage .openclaw-safe-update/coverage.json \
   --output artifacts/installation-contract.json
@@ -133,19 +139,19 @@ application phases are descriptive and never prove isolation.
 ### 5. Compose, Attest, and Rerun
 
 ```bash
-python3 scripts/openclaw_safe_update.py simulate \
+python3 "{baseDir}/scripts/openclaw_safe_update.py" simulate \
   --input-dir artifacts/input \
   --customizations .openclaw-safe-update/customizations.json \
   --coverage .openclaw-safe-update/coverage.json \
   --installation-contract artifacts/installation-contract.json \
   --output-dir artifacts/safe-update
 
-python3 scripts/openclaw_safe_update.py attest \
+python3 "{baseDir}/scripts/openclaw_safe_update.py" attest \
   --candidate-lock artifacts/safe-update/installation-candidate-lock.json \
   --observation .openclaw-safe-update/installation-observation.json \
   --output artifacts/installation-attestation.json
 
-python3 scripts/openclaw_safe_update.py simulate \
+python3 "{baseDir}/scripts/openclaw_safe_update.py" simulate \
   --input-dir artifacts/input \
   --customizations .openclaw-safe-update/customizations.json \
   --coverage .openclaw-safe-update/coverage.json \
@@ -167,21 +173,23 @@ Use the importer only to validate existing Kova artifacts against an explicit
 policy. It never runs or installs Kova:
 
 ```bash
-python3 scripts/openclaw_safe_update.py kova-evidence \
+python3 "{baseDir}/scripts/openclaw_safe_update.py" kova-evidence \
   --receipt <kova-receipt.json> \
   --candidate-lock <installation-candidate-lock.json> \
   --policy <kova-evidence-policy.json> \
   --output <kova-evidence.json>
 ```
 
-Start from `examples/kova-evidence-policy.example.json`. A `PASS` adds evidence
+Start from `{baseDir}/examples/kova-evidence-policy.example.json`. A `PASS` adds evidence
 only to the policy's named gates; it cannot mutate a rehearsal status or
 verdict. A current Kova result without an exact candidate identity is
 `incomplete` and exits `2`. The imported output contains only identifiers,
 statuses, and hashes, never logs, paths, configuration, messages, or secrets.
-An exact artifact match alone cannot satisfy `environment-matched-rehearsal`:
-the Kova report platform and toolchain must match the candidate lock. Missing
-environment fields are `incomplete`; known mismatches are `rejected`.
+The binding covers the core npm artifact only. Kova's `platform` describes the
+lab process, not the target runtime toolchain. An explicit
+`environment-matched-rehearsal` request remains `incomplete`; the bundled
+policy makes only scenario-specific lab claims. Installation parity, full
+state restoration, and live admission require separate evidence.
 
 ### 6. Review and Stop
 
@@ -238,7 +246,7 @@ sequential path.
 For an independent model review, prepare a digest-bound public-safe input:
 
 ```bash
-python3 scripts/openclaw_advisory.py prepare \
+python3 "{baseDir}/scripts/openclaw_advisory.py" prepare \
   --status artifacts/safe-update/verdict.json \
   --evidence-bundle artifacts/safe-update/evidence-bundle.json \
   --installation-candidate-lock artifacts/safe-update/installation-candidate-lock.json \
@@ -247,7 +255,7 @@ python3 scripts/openclaw_advisory.py prepare \
   --impact-shadow artifacts/safe-update/impact-shadow.json \
   --output artifacts/advisory-input.json
 
-python3 scripts/openclaw_advisory.py render-prompt \
+python3 "{baseDir}/scripts/openclaw_advisory.py" render-prompt \
   --input artifacts/advisory-input.json \
   --output artifacts/advisory-prompt.md
 ```

@@ -190,11 +190,33 @@ The importer only validates existing Kova artifacts. It never runs or installs
 Kova. A `PASS` adds evidence only for the policy's named gates; it cannot
 mutate a rehearsal status or verdict. A current Kova result without an exact
 candidate identity is correctly emitted as `incomplete` with exit code `2`.
-An exact artifact match alone cannot satisfy `environment-matched-rehearsal`:
-the Kova report platform and toolchain must match the candidate lock. Missing
-environment fields are `incomplete`; known mismatches are `rejected`.
+The binding explicitly covers the core npm artifact only, not the complete
+installation. Kova's `platform` describes its harness process, not the target
+runtime toolchain. Policies requesting `environment-matched-rehearsal` remain
+`incomplete`; the bundled example claims only scenario-specific lab evidence.
+The canonical preflight environment gate is unchanged.
 The output contains only identifiers, statuses, and hashes, never logs, paths,
 configuration, messages, or secrets.
+
+For full-copy state rehearsal, measured rollback, and admission checks after
+activation, follow [the Kova/OpenClaw upgrade method](references/kova-upgrade-rehearsal.md).
+The example migration policy requires preservation invariants in addition to
+snapshot presence. Every executed record must match the report target identity.
+
+To check the importer against a local Kova checkout with its dependencies
+installed, run:
+
+```bash
+KOVA_CHECKOUT=/path/to/Kova python3 -m unittest tests.test_kova_upstream -v
+```
+
+This contract test uses upstream report, ledger, and bundle producers with
+synthetic records. It neither provisions OpenClaw nor proves live migration.
+
+See the [anonymized 9.1-9.3 field report](references/field-report-2026-09.md)
+for the production experience behind this method, including the failed first
+attempt and the successful recovery. It distinguishes historical operational
+results from tests of the new importer.
 
 Replace both example manifests with checks for your actual system. A genuinely
 vanilla deployment can use `--allow-no-customizations --allow-no-coverage
@@ -215,7 +237,7 @@ protection this project exists to provide.
 | `impact-shadow.json` | Non-authoritative mapping from closed-candidate changes to components, capabilities, contracts, hypothetical checks, and unmapped paths |
 | `analysis-cache.json` | Non-authoritative full input digest plus per-namespace hit, miss, and ignored-entry provenance |
 | `archive-execution.json` | Non-authoritative worker count, per-archive status, timeout, and wall-clock telemetry |
-| `kova-evidence.json` | Optional, additive verification of an existing exact-candidate Kova execution; never changes the canonical verdict |
+| `kova-evidence.json` | Optional core-artifact-bound Kova lab evidence; never changes the canonical verdict or attests the whole installation |
 | `synthetic-update.json` | Bounded current-to-target package diff |
 | `customization-compatibility.json` | Results for every declared local contract |
 | `coverage-report.json` | Whether every required installation surface is represented and bound to evidence |
